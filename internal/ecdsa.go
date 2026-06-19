@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"hash"
 	"math/big"
 	"sync"
 )
@@ -33,7 +32,7 @@ func newECDSAMethod(name string, hash crypto.Hash, keySize int) *ecdsaSigningMet
 		},
 		hashPool: sync.Pool{
 			New: func() any {
-				return hash.New()
+				return &hasherBuf{Hash: hash.New()}
 			},
 		},
 	}
@@ -61,13 +60,13 @@ func (e *ecdsaSigningMethod) SignTo(dst []byte, signingString string, key any) (
 		return 0, fmt.Errorf("hash function %v not available", e.HashFunc)
 	}
 
-	hasher := e.hashPool.Get().(hash.Hash)
-	defer e.hashPool.Put(hasher)
-	hasher.Reset()
-	hasher.Write(stringToBytes(signingString))
+	hb := e.hashPool.Get().(*hasherBuf)
+	defer e.hashPool.Put(hb)
+	hb.Reset()
+	hb.Write(stringToBytes(signingString))
 
-	var hashBuf [64]byte
-	hashed := hasher.Sum(hashBuf[:0])
+	// hb.sum is heap-resident (pooled entry), so Sum does not escape a stack buffer.
+	hashed := hb.Sum(hb.sum[:0])
 
 	sigR, sigS, err := ecdsa.Sign(rand.Reader, ecdsaKey, hashed)
 	if err != nil {
@@ -160,13 +159,13 @@ func (e *ecdsaSigningMethod) Verify(signingString string, signature string, key 
 	r.SetBytes(sigBytes[:keyBytes])
 	s.SetBytes(sigBytes[keyBytes:])
 
-	hasher := e.hashPool.Get().(hash.Hash)
-	defer e.hashPool.Put(hasher)
-	hasher.Reset()
-	hasher.Write(stringToBytes(signingString))
+	hb := e.hashPool.Get().(*hasherBuf)
+	defer e.hashPool.Put(hb)
+	hb.Reset()
+	hb.Write(stringToBytes(signingString))
 
-	var hashBuf [64]byte
-	hashed := hasher.Sum(hashBuf[:0])
+	// hb.sum is heap-resident (pooled entry), so Sum does not escape a stack buffer.
+	hashed := hb.Sum(hb.sum[:0])
 
 	valid := ecdsa.Verify(ecdsaKey, hashed, r, s)
 	if !valid {

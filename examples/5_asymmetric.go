@@ -27,12 +27,17 @@ func main() {
 
 	fmt.Println()
 
-	// Example 2: ECDSA signing
+	// Example 2: RSA-PSS signing
+	psExample()
+
+	fmt.Println()
+
+	// Example 3: ECDSA signing
 	ecdsaExample()
 
 	fmt.Println()
 
-	// Example 3: Public/private key separation
+	// Example 4: Public/private key separation
 	keySeparationExample()
 
 	fmt.Println("\nAsymmetric signing example complete!")
@@ -76,8 +81,49 @@ func rsaExample() {
 	fmt.Printf("RSA token validated - User: %s\n", parsedClaims.Username)
 }
 
+func psExample() {
+	fmt.Println("Example 2: RSA-PSS Signing (PS256)")
+	fmt.Println("-----------------------------------")
+
+	// RSA-PSS is the modern RSA signature scheme; PSS padding has stronger
+	// security properties than PKCS#1 v1.5 and is recommended over RS256/384/512.
+	// It uses the same *rsa.PrivateKey key type as the RS* methods.
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		log.Fatalf("Failed to generate RSA key: %v", err)
+	}
+
+	cfg := jwt.DefaultConfig()
+	cfg.SigningKey = privateKey
+	cfg.SigningMethod = jwt.SigningMethodPS256
+	cfg.Issuer = "rsa-pss-service"
+
+	processor, err := jwt.New(cfg)
+	if err != nil {
+		log.Fatalf("Failed to create processor: %v", err)
+	}
+	defer processor.Close()
+
+	claims := jwt.Claims{
+		UserID:   "ps_user",
+		Username: "diana",
+		Role:     "admin",
+	}
+
+	token, err := processor.Create(&claims)
+	if err != nil {
+		log.Fatalf("Failed to create token: %v", err)
+	}
+
+	parsedClaims, valid, err := processor.Validate(token)
+	if err != nil || !valid {
+		log.Fatalf("Token validation failed: %v", err)
+	}
+	fmt.Printf("RSA-PSS token validated - User: %s\n", parsedClaims.Username)
+}
+
 func ecdsaExample() {
-	fmt.Println("Example 2: ECDSA Signing (ES256)")
+	fmt.Println("Example 3: ECDSA Signing (ES256)")
 	fmt.Println("--------------------------------")
 
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -115,7 +161,7 @@ func ecdsaExample() {
 }
 
 func keySeparationExample() {
-	fmt.Println("Example 3: VerificationKey Override")
+	fmt.Println("Example 4: VerificationKey Override")
 	fmt.Println("------------------------------------")
 
 	// Generate RSA key pair
@@ -172,7 +218,8 @@ func keySeparationExample() {
 	fmt.Printf("API service verified token (VerificationKey) - User: %s\n", parsedClaims.Username)
 
 	fmt.Println("\nAlgorithm comparison:")
-	fmt.Println("  HMAC:  Simple, fast, single-service (HS256/384/512)")
-	fmt.Println("  RSA:   Widely supported, larger signatures (RS256/384/512)")
-	fmt.Println("  ECDSA: Smaller signatures, faster verification (ES256/384/512)")
+	fmt.Println("  HMAC:    Simple, fast, single-service (HS256/384/512)")
+	fmt.Println("  RSA:     Widely supported, larger signatures (RS256/384/512)")
+	fmt.Println("  RSA-PSS: Modern RSA padding, recommended over RS* (PS256/384/512)")
+	fmt.Println("  ECDSA:   Smaller signatures, faster verification (ES256/384/512)")
 }

@@ -42,6 +42,8 @@ type Processor struct {
 	refreshTokenTTL   time.Duration
 	issuer            string
 	audience          string
+	requireExpiration bool
+	clockSkew         time.Duration
 	signingMethod     SigningMethod
 	signingMethodImpl internal.Method // Cached at construction to avoid per-call map lookup
 	blacklistManager  *internal.Manager
@@ -107,15 +109,17 @@ func New(cfg Config) (*Processor, error) {
 	}
 
 	p := &Processor{
-		accessTokenTTL:   config.AccessTokenTTL,
-		refreshTokenTTL:  config.RefreshTokenTTL,
-		issuer:           config.Issuer,
-		audience:         config.ExpectedAudience,
-		signingMethod:    config.SigningMethod,
-		blacklistManager: manager,
-		rateLimiter:      rateLimiter,
-		clock:            clock,
-		isAsymmetric:     config.SigningMethod.isAsymmetric(),
+		accessTokenTTL:    config.AccessTokenTTL,
+		refreshTokenTTL:   config.RefreshTokenTTL,
+		issuer:            config.Issuer,
+		audience:          config.ExpectedAudience,
+		requireExpiration: config.RequireExpiration,
+		clockSkew:         config.ClockSkew,
+		signingMethod:     config.SigningMethod,
+		blacklistManager:  manager,
+		rateLimiter:       rateLimiter,
+		clock:             clock,
+		isAsymmetric:      config.SigningMethod.isAsymmetric(),
 	}
 
 	// Set up keys based on algorithm type
@@ -182,6 +186,7 @@ func (p *Processor) Create(claims CustomClaims) (string, error) {
 //   - [ErrEmptyToken]: empty token string
 //   - [ErrInvalidToken]: malformed token or invalid signature
 //   - [ErrAlgorithmMismatch]: token algorithm does not match configured method
+//   - [ErrExpirationRequired]: token lacks an exp claim while RequireExpiration is set
 //   - [ErrTokenExpired]: token has expired
 //   - [ErrTokenNotValidYet]: token's nbf claim is in the future
 //   - [ErrTokenInvalidIssuer]: token issuer does not match configured issuer
@@ -217,6 +222,11 @@ func (p *Processor) Validate(tokenString string) (Claims, bool, error) {
 // The refresh token uses the configured RefreshTokenTTL instead of AccessTokenTTL.
 // Claims are validated (including deep field validation) before signing.
 //
+// Returns errors:
+//   - [ErrProcessorClosed]: processor has been closed
+//   - [ErrInvalidClaims]: claims failed validation (missing required fields, injection patterns, etc.)
+//   - [ErrRateLimitExceeded]: rate limit exceeded for the claims' subject/user
+//
 // Example:
 //
 //	claims := &jwt.Claims{UserID: "user123", Username: "alice"}
@@ -248,6 +258,7 @@ func (p *Processor) CreateRefresh(claims CustomClaims) (string, error) {
 //   - [ErrEmptyToken]: empty token string
 //   - [ErrInvalidToken]: malformed token or invalid signature
 //   - [ErrAlgorithmMismatch]: token algorithm does not match configured method
+//   - [ErrExpirationRequired]: token lacks an exp claim while RequireExpiration is set
 //   - [ErrTokenExpired]: refresh token has expired
 //   - [ErrTokenNotValidYet]: token's nbf claim is in the future
 //   - [ErrTokenInvalidIssuer]: token issuer does not match configured issuer
@@ -260,6 +271,11 @@ func (p *Processor) CreateRefresh(claims CustomClaims) (string, error) {
 // JWT fields (exp, nbf, iss, aud, blacklist) and basic structural validity
 // (UserID or Username must be present). Deep field constraints (length limits,
 // injection patterns) are not re-checked, trusting they were validated at creation.
+//
+// Rotation: Refresh does NOT revoke the supplied refresh token. The original
+// token remains valid until it expires or is explicitly revoked, so it can be
+// reused until then. For one-time-use refresh semantics, call
+// Revoke(refreshTokenString) after a successful Refresh.
 //
 // Example:
 //
@@ -298,6 +314,20 @@ func (p *Processor) Refresh(refreshTokenString string) (string, error) {
 // Tokens with token_type "access" are rejected to prevent access tokens from
 // being used to obtain new tokens. Tokens without a token_type are accepted
 // for backward compatibility.
+//
+// Returns errors:
+//   - [ErrProcessorClosed]: processor has been closed
+//   - [ErrEmptyToken]: empty token string
+//   - [ErrInvalidToken]: malformed token or invalid signature
+//   - [ErrAlgorithmMismatch]: token algorithm does not match configured method
+//   - [ErrExpirationRequired]: token lacks an exp claim while RequireExpiration is set
+//   - [ErrTokenExpired]: refresh token has expired
+//   - [ErrTokenNotValidYet]: token's nbf claim is in the future
+//   - [ErrTokenInvalidIssuer]: token issuer does not match configured issuer
+//   - [ErrTokenInvalidAudience]: token audience does not match configured audience
+//   - [ErrTokenRevoked]: refresh token has been revoked
+//   - [ErrInvalidClaims]: claims failed validation
+//   - [ErrTokenTypeMismatch]: token is an access token, not a refresh token
 //
 // Security note: Claims from the refresh token are validated for standard
 // JWT fields (exp, nbf, iss, aud, blacklist) and basic structural validity.
@@ -374,9 +404,15 @@ func (p *Processor) Close() error {
 	p.asymmetricKey = nil
 	p.verificationKey = nil
 
-	// Clear HMAC hasher pools to prevent stale key material from persisting
-	// after key rotation. Global pool is safe to drain — all Processor instances
-	// are closed before creating new ones with a different key.
+	// Wipe this processor's retained HMAC key copies. Pooled hashers hold a copy
+	// of the signing key (see internal getHasher), so draining on Close ensures
+	// those copies are zeroed promptly rather than lingering in the pool until GC.
+	//
+	// The HMAC hasher pools are package-global, so this also drains hashers pooled
+	// for OTHER live processors — they rebuild transparently on next use (getHasher
+	// re-checks the key via constant-time compare, so correctness is unaffected),
+	// at a one-time performance cost. Deployments with many long-lived processors
+	// sharing a key are unaffected; multi-key deployments pay the rebuild once per Close.
 	if !p.isAsymmetric {
 		internal.ClearHMACCaches()
 	}
@@ -401,6 +437,11 @@ func (p *Processor) IsClosed() bool {
 //
 // SECURITY: Claims parsed by this method may have been tampered with.
 // Always use Validate or ValidateInto for security-sensitive operations.
+//
+// Returns errors:
+//   - [ErrProcessorClosed]: processor has been closed
+//   - [ErrEmptyToken]: empty token string
+//   - a wrapped parse error if the token is malformed
 func (p *Processor) ParseUnverified(tokenString string, claims any) error {
 	if err := p.beginOp(); err != nil {
 		return err
@@ -423,6 +464,19 @@ func (p *Processor) ParseUnverified(tokenString string, claims any) error {
 // Returns the same claims pointer on success for convenience.
 // Note: the provided claims struct is populated in place with parsed token data,
 // unlike Validate which returns a value copy.
+//
+// Returns errors:
+//   - [ErrProcessorClosed]: processor has been closed
+//   - [ErrEmptyToken]: empty token string
+//   - [ErrInvalidToken]: malformed token or invalid signature
+//   - [ErrAlgorithmMismatch]: token algorithm does not match configured method
+//   - [ErrExpirationRequired]: token lacks an exp claim while RequireExpiration is set
+//   - [ErrTokenExpired]: token has expired
+//   - [ErrTokenNotValidYet]: token's nbf claim is in the future
+//   - [ErrTokenInvalidIssuer]: token issuer does not match configured issuer
+//   - [ErrTokenInvalidAudience]: token audience does not match configured audience
+//   - [ErrTokenRevoked]: token has been revoked
+//   - [ErrInvalidClaims]: claims failed validation
 //
 // Example:
 //
@@ -557,13 +611,29 @@ func (p *Processor) keyFunc(token *internal.Core) (any, error) {
 }
 
 func (p *Processor) validateRegistered(rc *RegisteredClaims) error {
+	// RequireExpiration: reject tokens that omit exp, which would otherwise never
+	// expire. Only the validation paths are gated; Revoke/IsRevoked deliberately
+	// skip this so a no-exp token can still be revoked.
+	if p.requireExpiration && rc.ExpiresAt.IsZero() {
+		return ErrExpirationRequired
+	}
 	now := p.clock.Now()
-	if !rc.ExpiresAt.IsZero() && now.After(rc.ExpiresAt.Time) {
+	// ClockSkew leeway: accept a token up to ClockSkew past its exp and from
+	// ClockSkew before its nbf, tolerating issuer/validator clock drift. A zero
+	// ClockSkew leaves these checks unchanged (Time.Add(0) is a no-op).
+	if !rc.ExpiresAt.IsZero() && now.After(rc.ExpiresAt.Time.Add(p.clockSkew)) {
 		return ErrTokenExpired
 	}
-	if !rc.NotBefore.IsZero() && now.Before(rc.NotBefore.Time) {
+	if !rc.NotBefore.IsZero() && now.Before(rc.NotBefore.Time.Add(-p.clockSkew)) {
 		return ErrTokenNotValidYet
 	}
+	return p.validateIssuerAudience(rc)
+}
+
+// validateIssuerAudience checks the issuer and audience claims against the
+// processor's configured values. Shared by validateRegistered and the
+// revoke/is-revoked paths so the rule lives in exactly one place.
+func (p *Processor) validateIssuerAudience(rc *RegisteredClaims) error {
 	if p.issuer != "" && rc.Issuer != p.issuer {
 		return ErrTokenInvalidIssuer
 	}
@@ -612,6 +682,26 @@ func (p *Processor) validateTokenInternal(tokenString string) (Claims, error) {
 	return *claims, nil
 }
 
+// finalizeValidation runs the blacklist check and claims validation shared by
+// every verify path. It looks up the token's jti (rc.ID) in the blacklist, then
+// invokes validate (the built-in Claims.Validate or a custom Validate) and wraps
+// any non-nil result in ErrInvalidClaims.
+//
+// Wrapping with ErrInvalidClaims lets callers use errors.Is uniformly across
+// Validate/ValidateInto and Refresh/RefreshInto. The concrete Validate methods
+// return descriptive errors rather than the sentinel itself (see [Claims.Validate]
+// docs), so wrapping does not double-wrap under the documented usage; the Create
+// path attaches the sentinel the same way in validateCustomClaims.
+func (p *Processor) finalizeValidation(rc *RegisteredClaims, validate func() error) error {
+	if err := p.checkBlacklist(rc.ID); err != nil {
+		return err
+	}
+	if err := validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidClaims, err)
+	}
+	return nil
+}
+
 // validateTokenFully performs complete token validation: parse, verify signature,
 // validate registered claims, check blacklist, and validate custom claims.
 // Returns a deep-copied Claims value with no pool obligations for the caller.
@@ -620,15 +710,9 @@ func (p *Processor) validateTokenFully(tokenString string) (Claims, error) {
 	if err != nil {
 		return Claims{}, err
 	}
-
-	if err := p.checkBlacklist(claims.ID); err != nil {
+	if err := p.finalizeValidation(&claims.RegisteredClaims, claims.Validate); err != nil {
 		return Claims{}, err
 	}
-
-	if err := claims.Validate(); err != nil {
-		return Claims{}, err
-	}
-
 	return claims, nil
 }
 
@@ -639,27 +723,55 @@ func (p *Processor) validateCustomTokenFully(tokenString string, claims CustomCl
 	if err := validateTokenIntoCustomClaims(p, tokenString, claims); err != nil {
 		return err
 	}
+	return p.finalizeValidation(claims.GetRegisteredClaims(), claims.Validate)
+}
 
-	if err := p.checkBlacklist(claims.GetRegisteredClaims().ID); err != nil {
-		return err
+// verifyAndExtractID verifies the token's signature, issuer, and audience, then
+// returns the jti and expiration. It does NOT check exp/nbf, so expired tokens
+// can still be revoked. Shared by Revoke and IsRevoked.
+func (p *Processor) verifyAndExtractID(tokenString string) (string, time.Time, error) {
+	// Verify signature before extracting jti to prevent forgery.
+	claims := getClaims()
+	defer putClaims(claims)
+
+	token, err := p.parseToken(tokenString, claims)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+	}
+	defer internal.ReleaseCore(token)
+
+	if !token.Valid {
+		return "", time.Time{}, ErrInvalidToken
 	}
 
-	return claims.Validate()
+	// Verify the token belongs to this processor's issuer/audience.
+	if err := p.validateIssuerAudience(&claims.RegisteredClaims); err != nil {
+		return "", time.Time{}, err
+	}
+
+	if claims.ID == "" {
+		return "", time.Time{}, ErrTokenMissingID
+	}
+
+	return claims.ID, claims.ExpiresAt.Time, nil
 }
 
 // Revoke adds a token to the blacklist by verifying its signature and
 // extracting the token ID (jti). Only tokens with a valid signature can be
 // revoked, preventing malicious actors from blacklisting arbitrary token IDs.
 //
-// The token's expiration is used to determine the blacklist entry TTL, bounded
-// by [DefaultBlacklistTTL] and [MaxBlacklistTTL]. Expired tokens can still be
-// revoked since the blacklist entry will be cleaned up automatically.
+// The token's expiration is used to determine the blacklist entry TTL: when
+// the token has no exp the entry defaults to 7 days, and the TTL is capped at
+// 30 days so a crafted exp cannot pin a long-lived entry (DoS guard). Expired
+// tokens can still be revoked; the blacklist entry is cleaned up automatically.
 //
 // Returns errors:
 //   - [ErrProcessorClosed]: processor has been closed
 //   - [ErrEmptyToken]: empty token string
 //   - [ErrBlacklistNotConfigured]: blacklist is not configured
 //   - [ErrInvalidToken]: invalid signature or malformed token
+//   - [ErrTokenInvalidIssuer]: token issuer does not match configured issuer
+//   - [ErrTokenInvalidAudience]: token audience does not match configured audience
 //   - [ErrTokenMissingID]: token does not contain a jti claim
 func (p *Processor) Revoke(tokenString string) error {
 	if err := p.beginOp(); err != nil {
@@ -674,37 +786,24 @@ func (p *Processor) Revoke(tokenString string) error {
 		return ErrBlacklistNotConfigured
 	}
 
-	// Verify signature before extracting jti to prevent forgery.
-	claims := getClaims()
-	defer putClaims(claims)
-
-	token, err := p.parseToken(tokenString, claims)
+	id, exp, err := p.verifyAndExtractID(tokenString)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidToken, err)
+		return err
 	}
-	defer internal.ReleaseCore(token)
-
-	if !token.Valid {
-		return ErrInvalidToken
-	}
-
-	// Verify the token belongs to this processor's issuer/audience.
-	if p.issuer != "" && claims.Issuer != p.issuer {
-		return ErrTokenInvalidIssuer
-	}
-	if p.audience != "" && !slices.Contains(claims.Audience, p.audience) {
-		return ErrTokenInvalidAudience
-	}
-
-	if claims.ID == "" {
-		return ErrTokenMissingID
-	}
-
-	return p.blacklistManager.BlacklistVerified(claims.ID, claims.ExpiresAt.Time)
+	return p.blacklistManager.BlacklistVerified(id, exp)
 }
 
 // IsRevoked checks if a token has been revoked by verifying its signature and
-// looking up its ID in the blacklist. Returns false if the blacklist is not configured.
+// looking up its ID in the blacklist. It returns false (with a nil error) when
+// the blacklist is not configured.
+//
+// Returns errors:
+//   - [ErrProcessorClosed]: processor has been closed
+//   - [ErrEmptyToken]: empty token string
+//   - [ErrInvalidToken]: invalid signature or malformed token
+//   - [ErrTokenInvalidIssuer]: token issuer does not match configured issuer
+//   - [ErrTokenInvalidAudience]: token audience does not match configured audience
+//   - [ErrTokenMissingID]: token does not contain a jti claim
 func (p *Processor) IsRevoked(tokenString string) (bool, error) {
 	if err := p.beginOp(); err != nil {
 		return false, err
@@ -718,30 +817,9 @@ func (p *Processor) IsRevoked(tokenString string) (bool, error) {
 		return false, nil
 	}
 
-	// Verify signature before extracting jti to prevent forgery.
-	claims := getClaims()
-	defer putClaims(claims)
-
-	token, err := p.parseToken(tokenString, claims)
+	id, _, err := p.verifyAndExtractID(tokenString)
 	if err != nil {
-		return false, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+		return false, err
 	}
-	defer internal.ReleaseCore(token)
-
-	if !token.Valid {
-		return false, ErrInvalidToken
-	}
-
-	if p.issuer != "" && claims.Issuer != p.issuer {
-		return false, ErrTokenInvalidIssuer
-	}
-	if p.audience != "" && !slices.Contains(claims.Audience, p.audience) {
-		return false, ErrTokenInvalidAudience
-	}
-
-	if claims.ID == "" {
-		return false, ErrTokenMissingID
-	}
-
-	return p.blacklistManager.IsBlacklisted(claims.ID)
+	return p.blacklistManager.IsBlacklisted(id)
 }

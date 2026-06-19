@@ -34,7 +34,7 @@ func New(cfg Config) (*Processor, error)
 
 // Configuration with defaults
 cfg := jwt.DefaultConfig()
-cfg.SecretKey = "your-secret-key-at-least-32-bytes-long"
+cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
 processor, err := jwt.New(cfg)
 if err != nil {
     log.Fatal(err)
@@ -63,6 +63,8 @@ type Config struct {
     RefreshTokenTTL   time.Duration // Default: 7 days (supports YAML/JSON: refresh_token_ttl)
     Issuer            string        // Default: "jwt-service" (supports YAML/JSON: issuer)
     ExpectedAudience  string        // Optional: reject tokens without matching aud claim (supports YAML/JSON: expected_audience)
+    RequireExpiration bool          // Optional: reject tokens missing exp with ErrExpirationRequired (Default: false; supports YAML/JSON: require_expiration)
+    ClockSkew        time.Duration  // Optional: leeway for exp/nbf to tolerate issuer/validator clock drift (Default: 0; supports YAML/JSON: clock_skew)
 
     // Blacklist configuration (embedded)
     Blacklist BlacklistConfig // Supports YAML/JSON: blacklist
@@ -200,12 +202,14 @@ func (p *Processor) Validate(tokenString string) (Claims, bool, error)
 
 **Returns:**
 - `Claims` - Parsed claims (value copy)
-- `bool` - True if token is valid
+- `bool` - `true` if the token is valid. **Always equivalent to `err == nil`**: on any validation failure `valid` is `false` *and* `err` is non-nil; on success `valid` is `true` *and* `err` is `nil`. The two never disagree, so checking `err != nil` alone is sufficient. The same invariant holds for `ValidateInto`.
 - `error` - Error if validation fails
 
 **Example:**
 ```go
-claims, valid, err := processor.Validate(token)
+// valid is always equivalent to (err == nil), so it can be discarded and
+// the error checked alone. (See the Returns note above.)
+claims, _, err := processor.Validate(token)
 if err != nil {
     switch {
     case errors.Is(err, jwt.ErrTokenExpired):
@@ -217,11 +221,7 @@ if err != nil {
     }
     return
 }
-if !valid {
-    // Token is invalid but no error
-    return
-}
-// Token is valid, use claims
+// Token is valid (err == nil guarantees it), use claims
 fmt.Println(claims.Username)
 ```
 
@@ -397,6 +397,7 @@ type RegisteredClaims struct {
     NotBefore NumericDate   `json:"nbf"`           // Not valid before
     IssuedAt  NumericDate   `json:"iat"`           // Issued at time
     ID        string        `json:"jti,omitempty"` // Unique token ID
+    TokenType string        `json:"token_type,omitempty"` // Token type: "access" or "refresh" (see TokenTypeAccess / TokenTypeRefresh)
 }
 ```
 
@@ -454,6 +455,8 @@ var (
     ErrAlgorithmMismatch  = errors.New("token algorithm does not match configured signing method")
     ErrTokenRevoked       = errors.New("token revoked")
     ErrTokenMissingID     = errors.New("token missing ID")
+    ErrTokenTypeMismatch  = errors.New("token type mismatch")
+    ErrExpirationRequired = errors.New("token missing expiration claim")
     ErrTokenExpired       = errors.New("token expired")
     ErrTokenNotValidYet   = errors.New("token not valid yet")
     ErrTokenInvalidIssuer   = errors.New("token invalid issuer")
@@ -548,12 +551,14 @@ Interface for custom rate limiters. Implementations must be safe for concurrent 
 
 ```go
 type RateLimitProvider interface {
-    Allow(key string) bool       // Check if a single request is allowed
-    AllowN(key string, n int) bool // Check if n requests are allowed
-    Reset(key string)            // Remove rate limit state for a key
-    Close()                      // Release resources
+    Allow(key string) bool // Check if a single request is allowed
+    Reset(key string)      // Remove rate limit state for a key
+    Close()                // Release resources
 }
 ```
+
+The built-in `RateLimiter` also exposes `AllowN(key string, n int) bool` for
+batch checks, but that method is not part of the `RateLimitProvider` interface.
 
 ### BlacklistStore
 
@@ -620,8 +625,9 @@ The following limits are enforced internally (not exported):
 | String field max length | 256 | Maximum length for string fields |
 | Array max size | 100 | Maximum elements in arrays |
 | Extra claims max fields | 50 | Maximum keys in Extra map |
-| Token max size | 8192 | Maximum token size in bytes |
-| Segment max length | 4096 | Maximum base64 segment size (internal: `maxSegmentLength`) |
+| Token max size | 131072 | Maximum token size in bytes |
+| Segment max length | 87384 | Maximum base64 segment size (internal: `maxSegmentLength`) |
+| Decoded payload max size | 65536 | Maximum decoded segment size (internal: `maxDecodedSize`) |
 
 ---
 
@@ -661,7 +667,7 @@ func NewRateLimiter(maxRate int, window time.Duration) *RateLimiter
 switch cfg.SigningMethod {
 case jwt.SigningMethodHS256, jwt.SigningMethodHS384, jwt.SigningMethodHS512:
     // HMAC - symmetric key
-    cfg.SecretKey = "your-secret-key"
+    cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
 case jwt.SigningMethodRS256, jwt.SigningMethodRS384, jwt.SigningMethodRS512:
     // RSA - asymmetric key
     cfg.SigningKey = rsaPrivateKey

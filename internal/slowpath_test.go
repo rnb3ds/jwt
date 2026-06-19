@@ -350,3 +350,131 @@ func TestSkipJSONStringEdgeCases(t *testing.T) {
 		})
 	}
 }
+
+// =============================================================================
+// HMAC Slow Path Tests (ParseWithClaimsHMAC → parseSlowPathHMAC)
+//
+// The generic slow-path tests above exercise ParseWithClaims (keyFunc path).
+// These mirror them through the type-specialized ParseWithClaimsHMAC path,
+// which the HMAC Processor uses exclusively — closing parseSlowPathHMAC.
+// =============================================================================
+
+// TestParseSlowPathHMACValid routes a unicode-escaped-header HMAC token
+// through the HMAC slow path and expects a valid result.
+func TestParseSlowPathHMACValid(t *testing.T) {
+	method, err := GetInternalSigningMethod("HS256")
+	if err != nil {
+		t.Fatalf("GetInternalSigningMethod failed: %v", err)
+	}
+	key := []byte("test-secret-key-with-sufficient-length-32bytes")
+
+	tokenString := buildSlowPathToken(t, method, key, `{"user_id":"hmac_slow"}`)
+
+	claims := make(map[string]any)
+	core, err := ParseWithClaimsHMAC(tokenString, &claims, key, "HS256")
+	if err != nil {
+		t.Fatalf("ParseWithClaimsHMAC (slow path) failed: %v", err)
+	}
+	defer ReleaseCore(core)
+
+	if !core.Valid {
+		t.Error("Expected valid token")
+	}
+	if core.Alg != "HS256" {
+		t.Errorf("Expected Alg=HS256, got %q", core.Alg)
+	}
+	if uid, _ := claims["user_id"].(string); uid != "hmac_slow" {
+		t.Errorf("Expected user_id=hmac_slow, got %v", claims["user_id"])
+	}
+}
+
+// TestParseSlowPathHMACInvalidSignature verifies the slow path marks a
+// bad-signature HMAC token invalid (rather than erroring).
+func TestParseSlowPathHMACInvalidSignature(t *testing.T) {
+	header := slowPathHeaderBytes("HS256")
+	headerB64 := base64.RawURLEncoding.EncodeToString(header)
+	payloadB64 := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"test"}`))
+	tokenString := headerB64 + "." + payloadB64 + ".aW52YWxpZHNpZ25hdHVyZQ"
+
+	claims := make(map[string]any)
+	core, err := ParseWithClaimsHMAC(tokenString, &claims,
+		[]byte("test-secret-key-with-sufficient-length-32bytes"), "HS256")
+	if err != nil {
+		t.Fatalf("ParseWithClaimsHMAC failed: %v", err)
+	}
+	defer ReleaseCore(core)
+
+	if core.Valid {
+		t.Error("Expected invalid token due to wrong signature")
+	}
+}
+
+// TestParseSlowPathHMACErrors drives the slow-path error branches that the
+// valid-path test does not reach: alg mismatch, insecure alg, unsupported alg,
+// missing alg, and empty header.
+func TestParseSlowPathHMACErrors(t *testing.T) {
+	key := []byte("test-secret-key-with-sufficient-length-32bytes")
+
+	tokenWithAlg := func(alg string) string {
+		headerB64 := base64.RawURLEncoding.EncodeToString(slowPathHeaderBytes(alg))
+		payloadB64 := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"test"}`))
+		return headerB64 + "." + payloadB64 + ".fakesig"
+	}
+
+	tests := []struct {
+		name        string
+		token       func() string
+		expectedAlg string
+		wantErr     string
+	}{
+		{
+			name:        "algorithm mismatch",
+			token:       func() string { return tokenWithAlg("HS384") },
+			expectedAlg: "HS256",
+			wantErr:     "does not match",
+		},
+		{
+			// expectedAlg must equal the alg so the HMAC slow path's mismatch
+			// check is bypassed and the insecure-algorithm branch is reached.
+			name:        "insecure algorithm",
+			token:       func() string { return tokenWithAlg("NONE") },
+			expectedAlg: "NONE",
+			wantErr:     "insecure algorithm",
+		},
+		{
+			name:        "unsupported algorithm",
+			token:       func() string { return tokenWithAlg("XYZ999") },
+			expectedAlg: "XYZ999",
+			wantErr:     "unsupported signing method",
+		},
+		{
+			name: "missing algorithm",
+			token: func() string {
+				return buildTokenWithHeader(t, `{"typ":"JWT","kid":"abc"}`, `{"sub":"test"}`, "fakesig")
+			},
+			expectedAlg: "HS256",
+			wantErr:     "missing or invalid algorithm",
+		},
+		{
+			name: "empty header",
+			token: func() string {
+				return buildTokenWithHeader(t, `{}`, `{"sub":"test"}`, "fakesig")
+			},
+			expectedAlg: "HS256",
+			wantErr:     "empty header",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			claims := make(map[string]any)
+			_, err := ParseWithClaimsHMAC(tt.token(), &claims, key, tt.expectedAlg)
+			if err == nil {
+				t.Fatal("Expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Expected error containing %q, got %q", tt.wantErr, err.Error())
+			}
+		})
+	}
+}

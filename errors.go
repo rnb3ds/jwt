@@ -37,6 +37,9 @@ var (
 	ErrTokenInvalidIssuer = errors.New("token invalid issuer")
 	// ErrTokenInvalidAudience indicates that the token's aud (audience) claim does not match the configured audience.
 	ErrTokenInvalidAudience = errors.New("token invalid audience")
+	// ErrExpirationRequired indicates that the token lacks an exp claim while
+	// RequireExpiration is enabled. Such tokens would otherwise never expire.
+	ErrExpirationRequired = errors.New("token missing expiration claim")
 
 	// ErrInvalidClaims indicates that the claims failed validation (missing required fields, injection patterns, etc.).
 	ErrInvalidClaims = errors.New("invalid claims")
@@ -55,11 +58,23 @@ var (
 
 // ValidationError represents a field-level validation failure.
 type ValidationError struct {
-	Field   string
+	// Field is the name of the field or claim that failed validation
+	// (e.g. "user_id", "extra.color", "audience").
+	Field string
+
+	// Message describes why the field is invalid
+	// (e.g. "exceeds maximum length of 256", "suspicious pattern detected").
 	Message string
-	Err     error
+
+	// Err is an optional underlying error wrapped by this validation failure.
+	// Unwrap returns it, so errors.Is and errors.As traverse it.
+	// May be nil when the failure has no wrapped cause.
+	Err error
 }
 
+// Error returns a human-readable description of the validation failure,
+// including the field name, message, and wrapped error (if any).
+// This implements the error interface.
 func (e *ValidationError) Error() string {
 	if e.Err != nil {
 		return fmt.Sprintf("validation failed for field '%s': %s: %v", e.Field, e.Message, e.Err)
@@ -67,6 +82,8 @@ func (e *ValidationError) Error() string {
 	return fmt.Sprintf("validation failed for field '%s': %s", e.Field, e.Message)
 }
 
+// Unwrap returns the wrapped error stored in Err, enabling errors.Is and
+// errors.As to reach an underlying cause. It returns nil when Err is unset.
 func (e *ValidationError) Unwrap() error {
 	return e.Err
 }

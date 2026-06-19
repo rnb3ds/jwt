@@ -42,7 +42,7 @@ const claimsKey contextKey = "claims"
 
 func main() {
     cfg := jwt.DefaultConfig()
-    cfg.SecretKey = "your-secret-key-at-least-32-bytes-long!!"
+    cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
     cfg.AccessTokenTTL = 15 * time.Minute
     cfg.RefreshTokenTTL = 7 * 24 * time.Hour
 
@@ -201,7 +201,7 @@ import (
 
 func main() {
     cfg := jwt.DefaultConfig()
-    cfg.SecretKey = "your-secret-key-at-least-32-bytes-long!!"
+    cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
     processor, _ := jwt.New(cfg)
     defer processor.Close()
 
@@ -356,7 +356,7 @@ import (
 
 func main() {
     cfg := jwt.DefaultConfig()
-    cfg.SecretKey = "your-secret-key-at-least-32-bytes-long!!"
+    cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
     processor, _ := jwt.New(cfg)
     defer processor.Close()
 
@@ -466,7 +466,7 @@ const claimsKey contextKey = "claims"
 
 func main() {
     cfg := jwt.DefaultConfig()
-    cfg.SecretKey = "your-secret-key-at-least-32-bytes-long!!"
+    cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
     processor, _ := jwt.New(cfg)
     defer processor.Close()
 
@@ -556,7 +556,7 @@ type server struct {
 
 func main() {
     cfg := jwt.DefaultConfig()
-    cfg.SecretKey = "your-secret-key-at-least-32-bytes-long!!"
+    cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
     processor, _ := jwt.New(cfg)
     defer processor.Close()
 
@@ -638,7 +638,7 @@ const claimsKey contextKey = "claims"
 
 func main() {
     cfg := jwt.DefaultConfig()
-    cfg.SecretKey = "your-secret-key-at-least-32-bytes-long!!"
+    cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
     processor, _ := jwt.New(cfg)
     defer processor.Close()
 
@@ -735,7 +735,7 @@ type WSClient struct {
 
 func main() {
     cfg := jwt.DefaultConfig()
-    cfg.SecretKey = "your-secret-key-at-least-32-bytes-long!!"
+    cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
     processor, _ := jwt.New(cfg)
     defer processor.Close()
 
@@ -806,6 +806,6 @@ func (c *WSClient) handle() {
 
 ## Complete Web Server Example
 
-See [examples/6_web_server.go](../examples/6_web_server.go) for a complete working example.
+See [examples/web_server/main.go](../examples/web_server/main.go) for a complete working example.
 
 ---

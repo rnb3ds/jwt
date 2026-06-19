@@ -331,7 +331,7 @@ func TestParseWithClaimsErrors(t *testing.T) {
 		},
 		{
 			name:        "token too large",
-			tokenString: strings.Repeat("a", 9000),
+			tokenString: strings.Repeat("a", 140000),
 			wantErr:     "token too large",
 		},
 		{
@@ -346,7 +346,7 @@ func TestParseWithClaimsErrors(t *testing.T) {
 		},
 		{
 			name:        "part too large",
-			tokenString: strings.Repeat("a", 5000) + "." + "b" + "." + "c",
+			tokenString: strings.Repeat("a", 90000) + "." + "b" + "." + "c",
 			wantErr:     "segment too large",
 		},
 		{
@@ -468,7 +468,7 @@ func TestParseUnverifiedErrors(t *testing.T) {
 		},
 		{
 			name:        "token too large",
-			tokenString: strings.Repeat("a", 9000),
+			tokenString: strings.Repeat("a", 140000),
 			wantErr:     "token too large",
 		},
 		{
@@ -554,7 +554,7 @@ func TestIsWeakKey(t *testing.T) {
 		[]byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
 		[]byte("12345678901234567890123456789012"),
 		[]byte("qwertyuiopasdfghjklzxcvbnm123456"),
-		[]byte{}, // empty key
+		{}, // empty key
 		[]byte("abcdefghijklmnopqrstuvwxyz123456"),   // sequential
 		[]byte("ababababababababababababababababab"), // low entropy
 	}
@@ -864,63 +864,6 @@ func TestManagerIsBlacklisted(t *testing.T) {
 	}
 	if isBlacklisted {
 		t.Error("Non-existent token should not be blacklisted")
-	}
-}
-
-func TestManagerBlacklistTokenString(t *testing.T) {
-	store := NewMemoryStore(1000, 5*time.Minute, false, nil)
-	manager := NewManagerWithClock(store, nil)
-	defer func() { _ = manager.Close() }() // best-effort cleanup
-
-	tests := []struct {
-		name        string
-		tokenString string
-		wantError   bool
-		errorMsg    string
-	}{
-		{
-			name:        "empty token string",
-			tokenString: "",
-			wantError:   true,
-			errorMsg:    "token string cannot be empty",
-		},
-		{
-			name:        "invalid token format",
-			tokenString: "invalid",
-			wantError:   true,
-			errorMsg:    "failed to parse token",
-		},
-		{
-			name:        "token without jti",
-			tokenString: "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoidGVzdCJ9.signature",
-			wantError:   true,
-			errorMsg:    "token does not contain a valid ID",
-		},
-		{
-			name:        "valid token with jti and exp",
-			tokenString: "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJqdGkiOiJ0b2tfMTIzNDU2IiwiZXhwIjoxNzAwMDAwMDAwfQ.signature",
-			wantError:   false,
-		},
-		{
-			name:        "valid token with jti without exp",
-			tokenString: "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJqdGkiOiJ0b2tfNzg5MDEyIn0.signature",
-			wantError:   false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := manager.BlacklistTokenString(tt.tokenString)
-			if tt.wantError && err == nil {
-				t.Error("Expected error, got nil")
-			}
-			if !tt.wantError && err != nil {
-				t.Errorf("Expected no error, got %v", err)
-			}
-			if tt.wantError && err != nil && !strings.Contains(err.Error(), tt.errorMsg) {
-				t.Errorf("Expected error containing '%s', got '%v'", tt.errorMsg, err)
-			}
-		})
 	}
 }
 
@@ -1251,58 +1194,6 @@ func TestNewManagerWithClock(t *testing.T) {
 		t.Fatal("NewManagerWithClock with nil clock returned nil")
 	}
 	_ = manager2.Close() // test cleanup
-}
-
-// =============================================================================
-// ParseTokenID Tests
-// =============================================================================
-
-func TestParseTokenID(t *testing.T) {
-	tests := []struct {
-		name      string
-		token     string
-		wantID    string
-		wantError bool
-	}{
-		{
-			name:   "valid token with jti",
-			token:  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJ0b2tfMTIzNDU2In0.signature",
-			wantID: "tok_123456",
-		},
-		{
-			name:   "token without jti",
-			token:  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoidGVzdCJ9.signature",
-			wantID: "",
-		},
-		{
-			name:      "malformed token",
-			token:     "malformed",
-			wantError: true,
-		},
-		{
-			name:      "empty token",
-			token:     "",
-			wantError: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			id, err := ParseTokenID(tt.token)
-			if tt.wantError {
-				if err == nil {
-					t.Error("Expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("Unexpected error: %v", err)
-			}
-			if id != tt.wantID {
-				t.Errorf("ParseTokenID() = %q, want %q", id, tt.wantID)
-			}
-		})
-	}
 }
 
 // =============================================================================
@@ -1665,5 +1556,123 @@ func TestHMACSignTo(t *testing.T) {
 				t.Error("Expected error for small buffer")
 			}
 		})
+	}
+}
+
+// =============================================================================
+// HMAC method Alg() Tests
+// =============================================================================
+
+// TestHMACSigningMethodAlg covers hmacSigningMethod.Alg(), which is otherwise
+// 0% — the typed SignTo/Verify paths never route through the Method interface's
+// Alg() for HMAC, unlike the RSA/ECDSA/PSS methods.
+func TestHMACSigningMethodAlg(t *testing.T) {
+	for _, alg := range []string{"HS256", "HS384", "HS512"} {
+		t.Run(alg, func(t *testing.T) {
+			method, err := GetInternalSigningMethod(alg)
+			if err != nil {
+				t.Fatalf("GetInternalSigningMethod(%q) failed: %v", alg, err)
+			}
+			hm, ok := method.(*hmacSigningMethod)
+			if !ok {
+				t.Fatalf("expected *hmacSigningMethod, got %T", method)
+			}
+			if hm.Alg() != alg {
+				t.Errorf("Alg() = %q, want %q", hm.Alg(), alg)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// mapCapacity Tests
+// =============================================================================
+
+func TestMapCapacity(t *testing.T) {
+	tests := []struct {
+		name string
+		size int
+		want int
+	}{
+		{"negative returns floor", -1, 8},
+		{"zero returns floor", 0, 8},
+		{"below floor returns size", 5, 5},
+		{"at floor returns size", 8, 8},
+		{"at ceiling returns size", 64, 64},
+		{"above ceiling capped", 100, 64},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := mapCapacity(tt.size); got != tt.want {
+				t.Errorf("mapCapacity(%d) = %d, want %d", tt.size, got, tt.want)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// BlacklistVerified TTL Bounding Tests
+// =============================================================================
+
+// recordingStore is a minimal storeOps fake that captures the expiration
+// passed to Add so the TTL-bounding logic in BlacklistVerified can be asserted.
+type recordingStore struct {
+	addedID  string
+	addedExp time.Time
+	addErr   error
+}
+
+func (r *recordingStore) Add(tokenID string, expiresAt time.Time) error {
+	r.addedID = tokenID
+	r.addedExp = expiresAt
+	return r.addErr
+}
+
+func (r *recordingStore) Contains(string) (bool, error) { return false, nil }
+
+func (r *recordingStore) Close() error { return nil }
+
+// TestBlacklistVerifiedTTLBounding drives every branch of the TTL-bounding
+// logic in manager.go:BlacklistVerified — zero exp, exp at/below default,
+// exp between default and max, and exp beyond max.
+func TestBlacklistVerifiedTTLBounding(t *testing.T) {
+	base := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name       string
+		expiresAt  time.Time
+		wantExpOff time.Duration // expected stored expiry relative to base
+	}{
+		{"zero exp uses default TTL", time.Time{}, DefaultBlacklistTTL},
+		{"exp below default uses default TTL", base.Add(time.Hour), DefaultBlacklistTTL},
+		{"exp at default uses default TTL", base.Add(DefaultBlacklistTTL), DefaultBlacklistTTL},
+		{"exp between default and max uses token exp", base.Add(10 * 24 * time.Hour), 10 * 24 * time.Hour},
+		{"exp beyond max capped to max TTL", base.Add(100 * 24 * time.Hour), MaxBlacklistTTL},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &recordingStore{}
+			manager := NewManagerWithClock(store, func() time.Time { return base })
+
+			if err := manager.BlacklistVerified("tok-123", tt.expiresAt); err != nil {
+				t.Fatalf("BlacklistVerified failed: %v", err)
+			}
+			if store.addedID != "tok-123" {
+				t.Errorf("stored token ID = %q, want %q", store.addedID, "tok-123")
+			}
+			want := base.Add(tt.wantExpOff)
+			if !store.addedExp.Equal(want) {
+				t.Errorf("stored expiry = %v, want %v", store.addedExp, want)
+			}
+		})
+	}
+
+	// Empty token ID is rejected before touching the store.
+	store := &recordingStore{}
+	manager := NewManagerWithClock(store, func() time.Time { return base })
+	if err := manager.BlacklistVerified("", base.Add(time.Hour)); err == nil {
+		t.Error("Expected error for empty token ID")
 	}
 }

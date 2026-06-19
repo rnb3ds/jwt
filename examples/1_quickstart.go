@@ -70,7 +70,7 @@ func main() {
 
 	fmt.Println("\nQuickstart complete!")
 	fmt.Println("\nNext steps:")
-	fmt.Println("  - See 2_processor.go for Processor pattern with full configuration")
-	fmt.Println("  - See 3_custom_claims.go for custom claim types")
-	fmt.Println("  - See 6_web_server.go for production web server example")
+	fmt.Println("  - See examples/processor for Processor pattern with full configuration")
+	fmt.Println("  - See examples/custom_claims for custom claim types")
+	fmt.Println("  - See examples/web_server for production web server example")
 }

@@ -13,11 +13,6 @@ const DefaultBlacklistTTL = 7 * 24 * time.Hour
 // untrusted exp values from crafted tokens causing DoS.
 const MaxBlacklistTTL = 30 * 24 * time.Hour
 
-type tokenClaims struct {
-	ID        string `json:"jti,omitempty"`
-	ExpiresAt int64  `json:"exp,omitempty"`
-}
-
 // storeOps defines the storage operations needed by Manager.
 // This is a subset of Store that excludes Cleanup(), since Manager
 // never triggers cleanup — the built-in memoryStore handles that internally.
@@ -43,26 +38,6 @@ func NewManagerWithClock(s storeOps, nowFunc func() time.Time) *Manager {
 	return &Manager{store: s, nowFunc: nowFunc}
 }
 
-// ParseTokenID extracts the token ID (jti) from a JWT without verifying the signature.
-// Returns empty string if the token has no jti claim.
-func ParseTokenID(tokenString string) (string, error) {
-	claims, err := parseTokenClaims(tokenString)
-	if err != nil {
-		return "", err
-	}
-	return claims.ID, nil
-}
-
-// parseTokenClaims extracts token claims without verification.
-func parseTokenClaims(tokenString string) (*tokenClaims, error) {
-	claims := &tokenClaims{}
-	_, _, err := ParseUnverified(tokenString, claims)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse token: %w", err)
-	}
-	return claims, nil
-}
-
 func (m *Manager) blacklistToken(tokenID string, expiresAt time.Time) error {
 	if tokenID == "" {
 		return fmt.Errorf("token ID cannot be empty")
@@ -77,19 +52,22 @@ func (m *Manager) IsBlacklisted(tokenID string) (bool, error) {
 	return m.store.Contains(tokenID)
 }
 
-// BlacklistVerified adds a verified token ID to the blacklist.
-// Unlike BlacklistTokenString, this accepts a pre-verified token ID and expiration,
-// eliminating the risk of forged tokens polluting the blacklist.
+// BlacklistVerified adds a pre-verified token ID to the blacklist.
+// Callers MUST verify the token's signature before calling this; accepting an
+// unverified token ID would let forged tokens pollute the blacklist.
 func (m *Manager) BlacklistVerified(tokenID string, expiresAt time.Time) error {
 	if tokenID == "" {
 		return fmt.Errorf("token ID cannot be empty")
 	}
 
-	blacklistExpiry := m.nowFunc().Add(DefaultBlacklistTTL)
+	// nowFunc may return a moving value (SystemClock); capture once so the
+	// default and max bounds are computed from the same instant.
+	now := m.nowFunc()
+	blacklistExpiry := now.Add(DefaultBlacklistTTL)
 	if !expiresAt.IsZero() {
 		tokenExp := expiresAt
 		if tokenExp.After(blacklistExpiry) {
-			maxExp := m.nowFunc().Add(MaxBlacklistTTL)
+			maxExp := now.Add(MaxBlacklistTTL)
 			if tokenExp.After(maxExp) {
 				blacklistExpiry = maxExp
 			} else {
@@ -99,36 +77,6 @@ func (m *Manager) BlacklistVerified(tokenID string, expiresAt time.Time) error {
 	}
 
 	return m.blacklistToken(tokenID, blacklistExpiry)
-}
-
-func (m *Manager) BlacklistTokenString(tokenString string) error {
-	if tokenString == "" {
-		return fmt.Errorf("token string cannot be empty")
-	}
-
-	claims, err := parseTokenClaims(tokenString)
-	if err != nil {
-		return err
-	}
-
-	if claims.ID == "" {
-		return fmt.Errorf("token does not contain a valid ID (jti)")
-	}
-
-	expiresAt := m.nowFunc().Add(DefaultBlacklistTTL)
-	if claims.ExpiresAt > 0 {
-		tokenExp := time.Unix(claims.ExpiresAt, 0)
-		if tokenExp.After(expiresAt) {
-			maxExp := m.nowFunc().Add(MaxBlacklistTTL)
-			if tokenExp.After(maxExp) {
-				expiresAt = maxExp
-			} else {
-				expiresAt = tokenExp
-			}
-		}
-	}
-
-	return m.blacklistToken(claims.ID, expiresAt)
 }
 
 func (m *Manager) Close() error {

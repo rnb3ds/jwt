@@ -80,7 +80,7 @@ func TestCoreDecodeSegment(t *testing.T) {
 		},
 		{
 			name:    "extremely long segment",
-			input:   strings.Repeat("a", 10000),
+			input:   strings.Repeat("a", 100000),
 			wantErr: true,
 		},
 	}

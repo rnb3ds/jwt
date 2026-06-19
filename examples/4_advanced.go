@@ -17,7 +17,7 @@ func main() {
 	fmt.Println("JWT Library - Advanced Features")
 	fmt.Println("===============================")
 
-	secretKey := "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~jK2#bN5$cM8@xZ7&vB4!"
+	const secretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~jK2#bN5$cM8@xZ7&vB4!"
 
 	// Example 1: Rate limiting
 	rateLimitingExample(secretKey)
@@ -113,6 +113,8 @@ func blacklistExample(secretKey string) {
 		log.Fatalf("Failed to create token: %v", err)
 	}
 
+	// Just-created token: Validate cannot fail here, so only the validity
+	// flag is needed for the demonstration.
 	_, valid, _ := processor.Validate(token)
 	fmt.Printf("Token valid: %v\n", valid)
 
@@ -161,22 +163,39 @@ func errorHandlingExample(secretKey string) {
 	}
 
 	// Token revoked error: create, revoke, then validate
-	token, _ := processor.Create(&jwt.Claims{UserID: "test"})
-	processor.Revoke(token)
+	token, err := processor.Create(&jwt.Claims{UserID: "test"})
+	if err != nil {
+		log.Fatalf("unexpected create error: %v", err)
+	}
+	if err := processor.Revoke(token); err != nil {
+		log.Fatalf("unexpected revoke error: %v", err)
+	}
 	_, valid, err := processor.Validate(token)
 	if !valid && errors.Is(err, jwt.ErrTokenRevoked) {
 		fmt.Println("Caught: token revoked")
 	}
 
-	// Issuer mismatch: processor expects different issuer than the token contains
+	// Issuer mismatch: two processors share the same key but enforce different
+	// iss values, so a token from issuer-A is rejected by the issuer-B processor.
 	mismatchCfg := jwt.Config{SecretKey: secretKey, Issuer: "issuer-A"}
-	mismatchProc, _ := jwt.New(mismatchCfg)
+	mismatchProc, err := jwt.New(mismatchCfg)
+	if err != nil {
+		log.Fatalf("Failed to create issuer-A processor: %v", err)
+	}
 	defer mismatchProc.Close()
-	mismatchToken, _ := mismatchProc.Create(&jwt.Claims{UserID: "test"})
+
+	mismatchToken, err := mismatchProc.Create(&jwt.Claims{UserID: "test"})
+	if err != nil {
+		log.Fatalf("Failed to create mismatch token: %v", err)
+	}
 
 	checkCfg := jwt.Config{SecretKey: secretKey, Issuer: "issuer-B"}
-	checkProc, _ := jwt.New(checkCfg)
+	checkProc, err := jwt.New(checkCfg)
+	if err != nil {
+		log.Fatalf("Failed to create issuer-B processor: %v", err)
+	}
 	defer checkProc.Close()
+
 	_, valid, err = checkProc.Validate(mismatchToken)
 	if !valid && errors.Is(err, jwt.ErrTokenInvalidIssuer) {
 		fmt.Println("Caught: issuer mismatch")

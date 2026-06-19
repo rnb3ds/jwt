@@ -15,6 +15,8 @@ const (
 	minEntropyKeyLength = 8
 )
 
+// ZeroBytes overwrites data with zeros and keeps the reference live so the
+// compiler cannot elide the wipe. Used to scrub secret material (e.g. HMAC keys).
 func ZeroBytes(data []byte) {
 	clear(data)
 	runtime.KeepAlive(data)
@@ -43,6 +45,9 @@ var weakPatterns = map[string]struct{}{
 	"welcome":    {},
 }
 
+// IsWeakKey reports whether key is too short, too low in entropy, or matches a
+// known weak/common pattern. It guards HMAC secrets against trivially guessable
+// values; an empty key is always weak.
 func IsWeakKey(key []byte) bool {
 	keyLen := len(key)
 	if keyLen == 0 {

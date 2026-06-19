@@ -16,7 +16,7 @@ func main() {
 	fmt.Println("JWT Library - Processor Pattern")
 	fmt.Println("===============================")
 
-	secretKey := "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~jK2#bN5$cM8@xZ7&vB4!"
+	const secretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~jK2#bN5$cM8@xZ7&vB4!"
 
 	// Example 1: Default configuration
 	fmt.Println("\nExample 1: Default Configuration")

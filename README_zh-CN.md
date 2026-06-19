@@ -247,7 +247,7 @@ cfg.SigningKey = privateKey
 cfg.SigningMethod = jwt.SigningMethodES256
 ```
 
-> **VerificationKey**：对于仅验证的服务，可将 `cfg.VerificationKey` 设置为公钥。设置后，验证使用 `VerificationKey` 而非从 `SigningKey` 派生公钥。完整示例参见 [非对称签名示例](examples/5_asymmetric.go)。
+> **VerificationKey**：对于仅验证的服务，可将 `cfg.VerificationKey` 设置为公钥。设置后，验证使用 `VerificationKey` 而非从 `SigningKey` 派生公钥。完整示例参见 [非对称签名示例](examples/asymmetric/main.go)。
 
 ### 自定义声明类型
 
@@ -287,7 +287,7 @@ func (c *MyClaims) Validate() error {
 
 func main() {
     cfg := jwt.DefaultConfig()
-    cfg.SecretKey = "your-super-secret-key-at-least-32-bytes-long!"
+    cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
 
     processor, err := jwt.New(cfg)
     if err != nil {
@@ -326,7 +326,7 @@ func main() {
 cfg := jwt.DefaultConfig()
 
 // === 签名配置（选择其一）===
-cfg.SecretKey = "your-32-byte-secret-key-here............."  // 用于 HMAC 算法
+cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"  // 用于 HMAC 算法
 cfg.SigningKey = privateKey                                  // 用于 RSA/ECDSA (*rsa.PrivateKey 或 *ecdsa.PrivateKey)
 cfg.VerificationKey = publicKey                              // 可选：仅用于验证的公钥
 cfg.SigningMethod = jwt.SigningMethodHS256                   // 见下表
@@ -336,6 +336,8 @@ cfg.AccessTokenTTL = 15 * time.Minute
 cfg.RefreshTokenTTL = 7 * 24 * time.Hour
 cfg.Issuer = "my-app"
 cfg.ExpectedAudience = "my-api"                              // 可选：拒绝不匹配 aud 的令牌
+cfg.RequireExpiration = true                                 // 可选：拒绝缺少 exp 的令牌（默认 false）
+cfg.ClockSkew = 30 * time.Second                             // 可选：exp/nbf 时钟漂移容忍（默认 0）
 
 // === 黑名单设置（嵌入在 Config 中）===
 cfg.Blacklist = jwt.BlacklistConfig{
@@ -371,6 +373,9 @@ defer processor.Close()
 | `SigningMethodRS256` | RSA | SHA-256（2048+ 位密钥） |
 | `SigningMethodRS384` | RSA | SHA-384 |
 | `SigningMethodRS512` | RSA | SHA-512 |
+| `SigningMethodPS256` | RSA-PSS | SHA-256（2048+ 位密钥，推荐优于 RS*） |
+| `SigningMethodPS384` | RSA-PSS | SHA-384 |
+| `SigningMethodPS512` | RSA-PSS | SHA-512 |
 | `SigningMethodES256` | ECDSA | SHA-256（P-256 曲线） |
 | `SigningMethodES384` | ECDSA | SHA-384（P-384 曲线） |
 | `SigningMethodES512` | ECDSA | SHA-512（P-521 曲线） |
@@ -532,6 +537,9 @@ if err != nil {
 }
 ```
 
+> **提示：** 对于 `Validate` 和 `ValidateInto`，返回的 `valid` 布尔值始终等价于
+> `err == nil` —— 二者检查其一即可。
+
 ### 可用错误
 
 | 错误 | 描述 |
@@ -548,6 +556,8 @@ if err != nil {
 | `ErrTokenInvalidIssuer` | 令牌颁发者不匹配 |
 | `ErrTokenInvalidAudience` | 令牌受众不匹配 |
 | `ErrTokenMissingID` | 令牌缺少 jti 声明 |
+| `ErrTokenTypeMismatch` | 刷新操作收到错误类型的令牌 |
+| `ErrExpirationRequired` | 设置 `RequireExpiration` 但令牌缺少 exp |
 | `ErrInvalidClaims` | 声明验证失败 |
 | `ErrRateLimitExceeded` | 超过速率限制 |
 | `ErrBlacklistNotConfigured` | 黑名单未配置 |
@@ -573,12 +583,12 @@ if errors.As(err, &verr) {
 ```go
 // 最简 - 使用默认配置
 cfg := jwt.DefaultConfig()
-cfg.SecretKey = "your-secret-key"
+cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
 processor, err := jwt.New(cfg)
 
 // 完整配置
 cfg := jwt.DefaultConfig()
-cfg.SecretKey = "your-secret-key"
+cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
 cfg.Issuer = "my-app"
 cfg.SigningMethod = jwt.SigningMethodHS512
 processor, err := jwt.New(cfg)

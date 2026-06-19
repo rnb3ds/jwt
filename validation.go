@@ -169,6 +169,16 @@ var dangerousPatterns = []string{
 var patternMask [256]uint64
 
 func init() {
+	// Developer invariant guard — NOT a runtime panic reachable from any public
+	// API. dangerousPatterns is a package-level constant, so this fires only if a
+	// maintainer adds a 65th entry. The cap equals the width of the uint64 bitmasks
+	// stored in patternMask: at index 64, `1 << uint(64)` evaluates to 0 for a
+	// uint64, so the offending pattern would receive a zero mask and never match.
+	// These are XSS/SQLi/injection signatures, so a silently-disabled pattern would
+	// be a security regression — the panic makes the mistake loud at package load
+	// instead of weakening detection. Keep as a Must-style assertion; do not convert
+	// to a returned error (init cannot return one) or move to tests (which would
+	// leave the runtime mask unchecked).
 	if len(dangerousPatterns) > 64 {
 		panic("dangerousPatterns exceeds 64 entries; widen patternMask type")
 	}

@@ -36,6 +36,9 @@ type memoryStore struct {
 	nowFunc       func() time.Time
 }
 
+// NewMemoryStore constructs an in-process blacklist Store bounded to maxSize
+// entries. When enableAutoCleanup is true, a background goroutine evicts
+// expired entries every cleanupInterval. If nowFunc is nil, time.Now is used.
 func NewMemoryStore(maxSize int, cleanupInterval time.Duration, enableAutoCleanup bool, nowFunc func() time.Time) Store {
 	// Ensure maxSize is positive to prevent nil map creation
 	if maxSize <= 0 {
@@ -71,7 +74,10 @@ func (m *memoryStore) Add(tokenID string, expiresAt time.Time) error {
 	if len(m.tokens) >= m.maxSize {
 		m.cleanupExpiredUnsafe(m.nowFunc())
 		if len(m.tokens) >= m.maxSize {
-			m.evictOldestUnsafe(m.maxSize / 10)
+			// Evict at least one entry so a small maxSize still makes room.
+			// Matches the RateLimiter's eviction strategy (max(count, 1));
+			// without the floor, maxSize < 10 would evict zero and reject forever.
+			m.evictOldestUnsafe(max(m.maxSize/10, 1))
 		}
 		// Final check: if still full after cleanup and eviction, reject
 		if len(m.tokens) >= m.maxSize {
@@ -189,10 +195,10 @@ func (m *memoryStore) evictOldestUnsafe(count int) {
 
 func (m *memoryStore) startAutoCleanup(interval time.Duration) {
 	m.cleanupTicker = time.NewTicker(interval)
-	m.cleanupWg.Add(1)
 
-	go func() {
-		defer m.cleanupWg.Done()
+	// WaitGroup.Go (Go 1.25) handles Add(1)/Done() around f, so the body only
+	// holds the select loop. Equivalent to the prior Add+go+defer Done form.
+	m.cleanupWg.Go(func() {
 		for {
 			select {
 			case <-m.cleanupTicker.C:
@@ -201,5 +207,5 @@ func (m *memoryStore) startAutoCleanup(interval time.Duration) {
 				return
 			}
 		}
-	}()
+	})
 }

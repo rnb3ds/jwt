@@ -119,9 +119,6 @@ func SignToken(alg string, claims any, method Method, key any) (string, error) {
 		claimsJSON = claimsJSON[:n-1]
 	}
 
-	claimsEncodedLen := base64.RawURLEncoding.EncodedLen(len(claimsJSON))
-	signingStringLen := len(headerEncoded) + 1 + claimsEncodedLen
-
 	bufPtr := signingBufPool.Get().(*[]byte)
 	defer func() {
 		encoderBufPool.Put(eb)
@@ -131,36 +128,18 @@ func SignToken(alg string, claims any, method Method, key any) (string, error) {
 		}
 	}()
 
-	// Ensure capacity for signing string + separator + signature.
-	// 1024 bytes covers all practical signature sizes (HS512: 86, RS4096: 684, ES512: 176).
-	needed := signingStringLen + 1 + 1024
-	if cap(*bufPtr) < needed {
-		*bufPtr = make([]byte, 0, needed+128)
-	}
+	// Build the signing string and signature destination in bufPtr. SAFETY:
+	// signingString aliases bufPtr's [0:signingStringLen) and sigDst is the region
+	// after the trailing '.', so they never overlap; both stay valid until the
+	// deferred cleanup returns bufPtr to signingBufPool.
+	signingString, sigDst, sigOffset := prepareSigning(headerEncoded, claimsJSON, bufPtr)
 
-	// Build signing string in buffer.
-	signingStringBuf := (*bufPtr)[:signingStringLen]
-	copy(signingStringBuf, stringToBytes(headerEncoded))
-	signingStringBuf[len(headerEncoded)] = '.'
-	base64.RawURLEncoding.Encode(signingStringBuf[len(headerEncoded)+1:], claimsJSON)
-
-	// SAFETY: signingString references bufPtr's pooled memory, which is valid
-	// until the deferred cleanup returns it to signingBufPool. The underlying
-	// bytes are never modified after this point — SignTo reads the string and
-	// writes to a separate region of the same buffer.
-	signingString := unsafe.String(&signingStringBuf[0], len(signingStringBuf))
-
-	// Sign directly into buffer, avoiding intermediate base64 string allocation.
-	fullBuf := (*bufPtr)[:cap(*bufPtr)]
-	sigOffset := signingStringLen + 1
-	fullBuf[sigOffset-1] = '.'
-
-	sigLen, err := method.SignTo(fullBuf[sigOffset:], signingString, key)
+	sigLen, err := method.SignTo(sigDst, signingString, key)
 	if err != nil {
 		return "", fmt.Errorf("failed to sign token: %w", err)
 	}
 
-	return string(fullBuf[:sigOffset+sigLen]), nil
+	return string((*bufPtr)[:sigOffset+sigLen]), nil
 }
 
 // SignTokenHMAC is a type-specialized variant of SignToken for HMAC algorithms.
@@ -183,9 +162,6 @@ func SignTokenHMAC(alg string, claims any, method Method, key []byte) (string, e
 		claimsJSON = claimsJSON[:n-1]
 	}
 
-	claimsEncodedLen := base64.RawURLEncoding.EncodedLen(len(claimsJSON))
-	signingStringLen := len(headerEncoded) + 1 + claimsEncodedLen
-
 	bufPtr := signingBufPool.Get().(*[]byte)
 	defer func() {
 		encoderBufPool.Put(eb)
@@ -195,6 +171,39 @@ func SignTokenHMAC(alg string, claims any, method Method, key []byte) (string, e
 		}
 	}()
 
+	signingString, sigDst, sigOffset := prepareSigning(headerEncoded, claimsJSON, bufPtr)
+
+	// Type-assert to HMAC method for direct []byte key usage.
+	hm, ok := method.(*hmacSigningMethod)
+	if !ok {
+		return "", fmt.Errorf("internal error: SignTokenHMAC called with non-HMAC method %T", method)
+	}
+	sigLen, err := hm.SignToHMAC(sigDst, signingString, key)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign token: %w", err)
+	}
+
+	return string((*bufPtr)[:sigOffset+sigLen]), nil
+}
+
+// prepareSigning builds the "header.payload" signing string in bufPtr's pooled
+// capacity and prepares the signature destination, returning:
+//   - signingString: the header.payload portion, aliased to bufPtr's [0:signingStringLen)
+//     via unsafe.String (valid until the caller returns bufPtr to the pool);
+//   - sigDst: the slice (fullBuf[sigOffset:]) the caller passes verbatim to its
+//     type-specialized SignTo/SignToHMAC — must not be re-derived by the caller;
+//   - sigOffset: the byte offset where the signature begins, so the caller can
+//     slice the final token as (*bufPtr)[:sigOffset+sigLen].
+//
+// The caller owns bufPtr and the deferred pool return; prepareSigning neither
+// acquires nor returns pool entries. signingString and sigDst are separated by
+// the '.' written at sigOffset-1, so they never overlap.
+func prepareSigning(headerEncoded string, claimsJSON []byte, bufPtr *[]byte) (signingString string, sigDst []byte, sigOffset int) {
+	claimsEncodedLen := base64.RawURLEncoding.EncodedLen(len(claimsJSON))
+	signingStringLen := len(headerEncoded) + 1 + claimsEncodedLen
+
+	// Ensure capacity for signing string + separator + signature.
+	// 1024 bytes covers all practical signature sizes (HS512: 86, RS4096: 684, ES512: 176).
 	needed := signingStringLen + 1 + 1024
 	if cap(*bufPtr) < needed {
 		*bufPtr = make([]byte, 0, needed+128)
@@ -205,23 +214,12 @@ func SignTokenHMAC(alg string, claims any, method Method, key []byte) (string, e
 	signingStringBuf[len(headerEncoded)] = '.'
 	base64.RawURLEncoding.Encode(signingStringBuf[len(headerEncoded)+1:], claimsJSON)
 
-	signingString := unsafe.String(&signingStringBuf[0], len(signingStringBuf))
+	signingString = unsafe.String(&signingStringBuf[0], len(signingStringBuf))
 
 	fullBuf := (*bufPtr)[:cap(*bufPtr)]
-	sigOffset := signingStringLen + 1
+	sigOffset = signingStringLen + 1
 	fullBuf[sigOffset-1] = '.'
-
-	// Type-assert to HMAC method for direct []byte key usage.
-	hm, ok := method.(*hmacSigningMethod)
-	if !ok {
-		return "", fmt.Errorf("internal error: SignTokenHMAC called with non-HMAC method %T", method)
-	}
-	sigLen, err := hm.SignToHMAC(fullBuf[sigOffset:], signingString, key)
-	if err != nil {
-		return "", fmt.Errorf("failed to sign token: %w", err)
-	}
-
-	return string(fullBuf[:sigOffset+sigLen]), nil
+	return signingString, fullBuf[sigOffset:], sigOffset
 }
 
 // GetInternalSigningMethod retrieves a signing method by algorithm name.

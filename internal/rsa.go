@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"hash"
 	"sync"
 )
 
@@ -38,13 +37,13 @@ func (r *rsaSigningMethod) SignTo(dst []byte, signingString string, key any) (in
 		return 0, fmt.Errorf("hash function %v not available", r.HashFunc)
 	}
 
-	hasher := r.hashPool.Get().(hash.Hash)
-	defer r.hashPool.Put(hasher)
-	hasher.Reset()
-	hasher.Write(stringToBytes(signingString))
+	hb := r.hashPool.Get().(*hasherBuf)
+	defer r.hashPool.Put(hb)
+	hb.Reset()
+	hb.Write(stringToBytes(signingString))
 
-	var hashBuf [64]byte
-	hashed := hasher.Sum(hashBuf[:0])
+	// hb.sum is heap-resident (pooled entry), so Sum does not escape a stack buffer.
+	hashed := hb.Sum(hb.sum[:0])
 
 	signature, err := rsa.SignPKCS1v15(rand.Reader, rsaKey, r.HashFunc, hashed)
 	if err != nil {
@@ -107,13 +106,13 @@ func (r *rsaSigningMethod) Verify(signingString string, signature string, key an
 		return errors.New("signature verification failed")
 	}
 
-	hasher := r.hashPool.Get().(hash.Hash)
-	defer r.hashPool.Put(hasher)
-	hasher.Reset()
-	hasher.Write(stringToBytes(signingString))
+	hb := r.hashPool.Get().(*hasherBuf)
+	defer r.hashPool.Put(hb)
+	hb.Reset()
+	hb.Write(stringToBytes(signingString))
 
-	var hashBuf [64]byte
-	hashed := hasher.Sum(hashBuf[:0])
+	// hb.sum is heap-resident (pooled entry), so Sum does not escape a stack buffer.
+	hashed := hb.Sum(hb.sum[:0])
 
 	err = rsa.VerifyPKCS1v15(rsaKey, r.HashFunc, hashed, sigBytes)
 	if err != nil {
@@ -128,7 +127,7 @@ func newRSAMethod(name string, hash crypto.Hash) *rsaSigningMethod {
 		Name:     name,
 		HashFunc: hash,
 		hashPool: sync.Pool{
-			New: func() any { return hash.New() },
+			New: func() any { return &hasherBuf{Hash: hash.New()} },
 		},
 	}
 }
@@ -167,13 +166,13 @@ func (r *rsaPSSSigningMethod) SignTo(dst []byte, signingString string, key any) 
 		return 0, fmt.Errorf("hash function %v not available", r.HashFunc)
 	}
 
-	hasher := r.hashPool.Get().(hash.Hash)
-	defer r.hashPool.Put(hasher)
-	hasher.Reset()
-	hasher.Write(stringToBytes(signingString))
+	hb := r.hashPool.Get().(*hasherBuf)
+	defer r.hashPool.Put(hb)
+	hb.Reset()
+	hb.Write(stringToBytes(signingString))
 
-	var hashBuf [64]byte
-	hashed := hasher.Sum(hashBuf[:0])
+	// hb.sum is heap-resident (pooled entry), so Sum does not escape a stack buffer.
+	hashed := hb.Sum(hb.sum[:0])
 
 	signature, err := rsa.SignPSS(rand.Reader, rsaKey, r.HashFunc, hashed, &r.opts)
 	if err != nil {
@@ -236,13 +235,13 @@ func (r *rsaPSSSigningMethod) Verify(signingString string, signature string, key
 		return errors.New("signature verification failed")
 	}
 
-	hasher := r.hashPool.Get().(hash.Hash)
-	defer r.hashPool.Put(hasher)
-	hasher.Reset()
-	hasher.Write(stringToBytes(signingString))
+	hb := r.hashPool.Get().(*hasherBuf)
+	defer r.hashPool.Put(hb)
+	hb.Reset()
+	hb.Write(stringToBytes(signingString))
 
-	var hashBuf [64]byte
-	hashed := hasher.Sum(hashBuf[:0])
+	// hb.sum is heap-resident (pooled entry), so Sum does not escape a stack buffer.
+	hashed := hb.Sum(hb.sum[:0])
 
 	err = rsa.VerifyPSS(rsaKey, r.HashFunc, hashed, sigBytes, &r.opts)
 	if err != nil {
@@ -258,7 +257,7 @@ func newRSSMethod(name string, hash crypto.Hash) *rsaPSSSigningMethod {
 		HashFunc: hash,
 		opts:     rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash},
 		hashPool: sync.Pool{
-			New: func() any { return hash.New() },
+			New: func() any { return &hasherBuf{Hash: hash.New()} },
 		},
 	}
 }

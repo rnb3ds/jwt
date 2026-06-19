@@ -247,7 +247,7 @@ cfg.SigningKey = privateKey
 cfg.SigningMethod = jwt.SigningMethodES256
 ```
 
-> **VerificationKey**: For verification-only services, set `cfg.VerificationKey` to the public key. When set, verification uses `VerificationKey` instead of deriving the public key from `SigningKey`. See [Asymmetric Example](examples/5_asymmetric.go) for a complete demonstration.
+> **VerificationKey**: For verification-only services, set `cfg.VerificationKey` to the public key. When set, verification uses `VerificationKey` instead of deriving the public key from `SigningKey`. See [Asymmetric Example](examples/asymmetric/main.go) for a complete demonstration.
 
 ### Custom Claims
 
@@ -286,7 +286,7 @@ func (c *MyClaims) Validate() error {
 
 func main() {
     cfg := jwt.DefaultConfig()
-    cfg.SecretKey = "your-super-secret-key-at-least-32-bytes-long!"
+    cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
 
     processor, err := jwt.New(cfg)
     if err != nil {
@@ -325,7 +325,7 @@ func main() {
 cfg := jwt.DefaultConfig()
 
 // === Signing configuration (choose one) ===
-cfg.SecretKey = "your-32-byte-secret-key-here............."  // For HMAC algorithms
+cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"  // For HMAC algorithms
 cfg.SigningKey = privateKey                                  // For RSA/ECDSA (*rsa.PrivateKey or *ecdsa.PrivateKey)
 cfg.VerificationKey = publicKey                              // Optional: public key for verification only
 cfg.SigningMethod = jwt.SigningMethodHS256                   // See table below
@@ -335,6 +335,8 @@ cfg.AccessTokenTTL = 15 * time.Minute
 cfg.RefreshTokenTTL = 7 * 24 * time.Hour
 cfg.Issuer = "my-app"
 cfg.ExpectedAudience = "my-api"                              // Optional: reject tokens without matching aud
+cfg.RequireExpiration = true                                 // Optional: reject tokens missing exp (default false)
+cfg.ClockSkew = 30 * time.Second                             // Optional: leeway for exp/nbf vs clock drift (default 0)
 
 // === Blacklist settings (embedded in Config) ===
 cfg.Blacklist = jwt.BlacklistConfig{
@@ -370,6 +372,9 @@ defer processor.Close()
 | `SigningMethodRS256` | RSA | SHA-256 (2048+ bit key) |
 | `SigningMethodRS384` | RSA | SHA-384 |
 | `SigningMethodRS512` | RSA | SHA-512 |
+| `SigningMethodPS256` | RSA-PSS | SHA-256 (2048+ bit key, recommended over RS*) |
+| `SigningMethodPS384` | RSA-PSS | SHA-384 |
+| `SigningMethodPS512` | RSA-PSS | SHA-512 |
 | `SigningMethodES256` | ECDSA | SHA-256 (P-256 curve) |
 | `SigningMethodES384` | ECDSA | SHA-384 (P-384 curve) |
 | `SigningMethodES512` | ECDSA | SHA-512 (P-521 curve) |
@@ -531,6 +536,9 @@ if err != nil {
 }
 ```
 
+> **Note:** For `Validate` and `ValidateInto`, the returned `valid` boolean is always equivalent to
+> `err == nil` — checking either is sufficient.
+
 ### Available Errors
 
 | Error | Description |
@@ -547,6 +555,8 @@ if err != nil {
 | `ErrTokenInvalidIssuer` | Token issuer does not match |
 | `ErrTokenInvalidAudience` | Token audience does not match |
 | `ErrTokenMissingID` | Token missing jti claim |
+| `ErrTokenTypeMismatch` | Refresh received a token of the wrong type |
+| `ErrExpirationRequired` | Token missing exp while `RequireExpiration` set |
 | `ErrInvalidClaims` | Claims validation failed |
 | `ErrRateLimitExceeded` | Rate limit exceeded |
 | `ErrBlacklistNotConfigured` | Blacklist operation without configuration |
@@ -572,12 +582,12 @@ if errors.As(err, &verr) {
 ```go
 // Minimal - with default config
 cfg := jwt.DefaultConfig()
-cfg.SecretKey = "your-secret-key"
+cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
 processor, err := jwt.New(cfg)
 
 // Full configuration
 cfg := jwt.DefaultConfig()
-cfg.SecretKey = "your-secret-key"
+cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
 cfg.Issuer = "my-app"
 cfg.SigningMethod = jwt.SigningMethodHS512
 processor, err := jwt.New(cfg)
