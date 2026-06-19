@@ -1,10 +1,13 @@
 package internal
 
+// Core is the internal representation of a parsed JWT: its decoded header,
+// claims, and signature, plus cached parse state consumed by the verification
+// fast path. Cores are pooled — obtain one from a Parse* function and return it
+// with ReleaseCore.
 type Core struct {
-	Header    map[string]any `json:"header"`
-	Claims    any            `json:"claims"`
-	Signature string         `json:"-"`
-	Method    Method
+	Header    map[string]any
+	Claims    any
+	Signature string
 	Valid     bool
 	Raw       string
 	// Alg caches the algorithm extracted during fast-path parsing so keyFunc

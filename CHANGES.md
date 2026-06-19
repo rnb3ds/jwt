@@ -4,6 +4,34 @@ All notable changes to the cybergodev/jwt library will be documented in this fil
 
 ---
 
+## v1.2.2 - Security Fixes, Production-Readiness & Performance (2026-06-20)
+
+### Added
+
+- `Config.ClockSkew` — leeway applied to `exp`/`nbf` during validation to tolerate issuer/validator clock drift (zero preserves the historical strict checks)
+- `Config.RequireExpiration` — rejects tokens lacking `exp` with `ErrExpirationRequired`, closing the "no exp → never expires" footgun for external tokens
+- `ErrExpirationRequired` sentinel error
+- Testable `Example*` functions now render in pkg.go.dev (the library previously had none); godoc added for previously-undocumented exported symbols and fields
+
+### Changed
+
+- Rate limiter evicts stale buckets in batches, removing the per-insert O(n) full-map scan under sustained over-capacity traffic (DoS hardening)
+- Examples restructured into `examples/<name>/main.go` subdirectories so `go build -tags example ./examples/...` compiles as a package (old flat `examples/N_name.go` paths removed; not part of the importable API)
+
+### Fixed
+
+- `Create`/`CreateRefresh` return `ErrInvalidClaims` instead of panicking on nil claims (nil interface or typed-nil `*Claims`)
+- Create and Validate now agree on maximum payload size — large-but-valid tokens that could be created but failed to parse back now round-trip
+- `memoryStore` with `maxSize < 10` no longer rejects `Add` forever once full (eviction floor guarantees at least one slot is freed)
+- `Revoke`/`Validate`/`Refresh` godoc: fixed broken internal doc links and added `ErrExpirationRequired` to the documented error lists
+
+### Performance
+
+- Validation hot path: `NumericDate` parses timestamps with zero string allocations via `parseDecimalInt64`; `internAlg` interns standard algorithms through a `[5]byte` lookup (Validate 15→12 allocs/op, −7.4% B/op)
+- Sign/verify (HMAC/RSA/ECDSA): a pooled `sum` output buffer eliminates the per-call `[64]byte` heap escape (TokenCreation 5→4 allocs/op, TokenValidation 12→11)
+
+---
+
 ## v1.2.1 - Security Hardening, Performance & Code Quality (2026-05-08)
 
 ### Breaking

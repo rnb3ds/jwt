@@ -17,22 +17,47 @@ type Config struct {
 	SecretKey       string        // For HMAC algorithms (minimum 32 bytes)
 	SigningKey      any           // For asymmetric algorithms (*rsa.PrivateKey or *ecdsa.PrivateKey)
 	VerificationKey any           // Optional: public key for verification only (*rsa.PublicKey or *ecdsa.PublicKey)
-	SigningMethod   SigningMethod // HS256, HS384, HS512, RS256, RS384, RS512, ES256, ES384, ES512
+	SigningMethod   SigningMethod // HS256, HS384, HS512, RS256, RS384, RS512, PS256, PS384, PS512, ES256, ES384, ES512
 
 	// Token configuration
-	AccessTokenTTL   time.Duration `yaml:"access_token_ttl" json:"access_token_ttl"`
-	RefreshTokenTTL  time.Duration `yaml:"refresh_token_ttl" json:"refresh_token_ttl"`
-	Issuer           string        `yaml:"issuer" json:"issuer"`
-	ExpectedAudience string        `yaml:"expected_audience" json:"expected_audience"` // Optional: reject tokens without matching aud claim
+	// AccessTokenTTL is the lifetime of access tokens issued by Create.
+	AccessTokenTTL time.Duration `yaml:"access_token_ttl" json:"access_token_ttl"`
+	// RefreshTokenTTL is the lifetime of refresh tokens issued by CreateRefresh.
+	// Must be greater than AccessTokenTTL.
+	RefreshTokenTTL time.Duration `yaml:"refresh_token_ttl" json:"refresh_token_ttl"`
+	// Issuer is written to the token's iss claim and checked during validation.
+	Issuer string `yaml:"issuer" json:"issuer"`
+	// ExpectedAudience, when non-empty, rejects tokens whose aud claim does not
+	// contain this value during validation.
+	ExpectedAudience string `yaml:"expected_audience" json:"expected_audience"`
+	// RequireExpiration, when true, rejects tokens that lack an exp claim during
+	// validation (Validate/ValidateInto/Refresh/RefreshInto) with ErrExpirationRequired.
+	// Tokens issued by this processor always carry exp (derived from the TTL), so
+	// this primarily governs tokens from other issuers or tokens missing exp —
+	// without it, such a token never expires (RFC 7519 makes exp optional).
+	// Default: false (historical behavior).
+	RequireExpiration bool `yaml:"require_expiration" json:"require_expiration"`
+	// ClockSkew is the leeway applied to exp and nbf during validation, to
+	// tolerate clock drift between the token issuer and this validator. A token
+	// is accepted up to ClockSkew after its exp, and from ClockSkew before its
+	// nbf. Zero (the default) applies no leeway and reproduces the historical
+	// strict timing checks; negative values are rejected by Validate.
+	ClockSkew time.Duration `yaml:"clock_skew" json:"clock_skew"`
 
 	// Blacklist configuration (embedded)
 	Blacklist BlacklistConfig `yaml:"blacklist" json:"blacklist"`
 
 	// Rate limiting
-	EnableRateLimit bool              `yaml:"enable_rate_limit" json:"enable_rate_limit"`
-	RateLimitRate   int               `yaml:"rate_limit_rate" json:"rate_limit_rate"`
-	RateLimitWindow time.Duration     `yaml:"rate_limit_window" json:"rate_limit_window"`
-	RateLimiter     RateLimitProvider `yaml:"-" json:"-"`
+	// EnableRateLimit enables per-subject rate limiting on token creation.
+	// When false (the default), the RateLimit* fields below are ignored.
+	EnableRateLimit bool `yaml:"enable_rate_limit" json:"enable_rate_limit"`
+	// RateLimitRate is the maximum number of tokens allowed per subject per window.
+	RateLimitRate int `yaml:"rate_limit_rate" json:"rate_limit_rate"`
+	// RateLimitWindow is the duration over which RateLimitRate is measured.
+	RateLimitWindow time.Duration `yaml:"rate_limit_window" json:"rate_limit_window"`
+	// RateLimiter optionally supplies a custom rate limiter. When nil and
+	// EnableRateLimit is true, a built-in limiter is built from the fields above.
+	RateLimiter RateLimitProvider `yaml:"-" json:"-"`
 
 	// Clock provider for time operations (optional, defaults to SystemClock)
 	Clock ClockProvider `yaml:"-" json:"-"`
@@ -115,6 +140,10 @@ func (c *Config) Validate() error {
 
 	if c.AccessTokenTTL >= c.RefreshTokenTTL {
 		return fmt.Errorf("%w: access token TTL must be less than refresh token TTL", ErrInvalidConfig)
+	}
+
+	if c.ClockSkew < 0 {
+		return fmt.Errorf("%w: clock skew must not be negative", ErrInvalidConfig)
 	}
 
 	if !c.SigningMethod.isValid() {

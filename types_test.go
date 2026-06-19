@@ -48,6 +48,8 @@ func TestNumericDateUnmarshalJSON(t *testing.T) {
 		{"invalid format", `"not-a-number"`, 0, false, true},
 		{"negative timestamp", "-1", 0, false, true},
 		{"exceeds max timestamp", "999999999999", 0, false, true},
+		{"int64 overflow", "9223372036854775808", 0, false, true},
+		{"int64 overflow with trailing digits", "99999999999999999999", 0, false, true},
 		{"empty bytes", "", 0, false, true},
 		{"float string", "1609459200.5", 0, false, true},
 	}
@@ -158,6 +160,31 @@ func TestStringOrSliceUnmarshalErrors(t *testing.T) {
 			var sos StringOrSlice
 			if err := json.Unmarshal([]byte(tt.input), &sos); err == nil {
 				t.Error("Expected error")
+			}
+		})
+	}
+}
+
+func TestStringOrSliceMarshalJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		sos  StringOrSlice
+		want string
+	}{
+		{"nil marshals to null", nil, "null"},
+		{"empty marshals to array", StringOrSlice{}, "[]"},
+		{"single element marshals to string", StringOrSlice{"api-v1"}, `"api-v1"`},
+		{"multiple elements marshals to array", StringOrSlice{"api-v1", "api-v2"}, `["api-v1","api-v2"]`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(tt.sos)
+			if err != nil {
+				t.Fatalf("Failed to marshal: %v", err)
+			}
+			if string(data) != tt.want {
+				t.Errorf("Marshal() = %s, want %s", string(data), tt.want)
 			}
 		})
 	}

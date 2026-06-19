@@ -20,7 +20,13 @@ import (
 // Production-ready web server with JWT authentication.
 // Demonstrates: authentication flow, middleware, RBAC, graceful shutdown.
 
-var processor *jwt.Processor
+// processor is the package-level JWT processor, initialized in main.
+// expiresInSeconds is derived from the access-token TTL and returned to
+// clients as "expires_in" so the value never drifts from the real TTL.
+var (
+	processor        *jwt.Processor
+	expiresInSeconds int
+)
 
 // contextKey is a custom type for context values to avoid collisions.
 type contextKey string
@@ -57,41 +63,19 @@ type ErrorResponse struct {
 	Message string `json:"message"`
 }
 
-func init() {
-	// Initialize JWT processor with production configuration
-	secretKey := os.Getenv("JWT_SECRET_KEY")
-	if secretKey == "" {
-		// Demo key - use environment variable in production
-		secretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~jK2#bN5$cM8@xZ7&vB4!"
-		log.Println("WARNING: Using demo secret key - set JWT_SECRET_KEY in production")
-	}
-
-	cfg := jwt.DefaultConfig()
-	cfg.SecretKey = secretKey
-	cfg.AccessTokenTTL = 15 * time.Minute
-	cfg.RefreshTokenTTL = 7 * 24 * time.Hour
-	cfg.Issuer = "web-server-example"
-	cfg.EnableRateLimit = true
-	cfg.RateLimitRate = 100
-	cfg.RateLimitWindow = time.Minute
-	cfg.Blacklist = jwt.BlacklistConfig{
-		MaxSize:           10000,
-		CleanupInterval:   5 * time.Minute,
-		EnableAutoCleanup: true,
-	}
-
-	var err error
-	processor, err = jwt.New(cfg)
-	if err != nil {
-		log.Fatalf("Failed to initialize JWT processor: %v", err)
-	}
-
-	log.Println("JWT processor initialized")
-}
-
 func main() {
 	fmt.Println("JWT Web Server - Production Example")
 	fmt.Println("====================================")
+
+	var err error
+	processor, expiresInSeconds, err = newJWTProcessor()
+	if err != nil {
+		log.Fatalf("Failed to initialize JWT processor: %v", err)
+	}
+	log.Println("JWT processor initialized")
+
+	// Listen address is configurable via JWT_PORT; defaults to :8080.
+	addr := ":" + envDefault("JWT_PORT", "8080")
 
 	// Setup HTTP routes
 	mux := http.NewServeMux()
@@ -100,11 +84,13 @@ func main() {
 	mux.HandleFunc("/profile", authMiddleware(profileHandler))
 	mux.HandleFunc("/admin", authMiddleware(requireRole("admin", adminHandler)))
 	mux.HandleFunc("/logout", authMiddleware(logoutHandler))
+	// /refresh authenticates with the refresh token in the body; it is not
+	// behind the access-token authMiddleware.
 	mux.HandleFunc("/refresh", refreshHandler)
 
 	// Create HTTP server
 	server := &http.Server{
-		Addr:         ":8080",
+		Addr:         addr,
 		Handler:      mux,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
@@ -113,15 +99,15 @@ func main() {
 
 	// Start server in goroutine
 	go func() {
-		log.Println("Server listening on http://localhost:8080")
+		log.Printf("Server listening on http://localhost%s", addr)
 		log.Println("\nAvailable endpoints:")
 		log.Println("  POST /login    - User login")
-		log.Println("  GET  /profile  - User profile (requires auth)")
+		log.Println("  GET  /profile  - User profile (requires access token)")
 		log.Println("  GET  /admin    - Admin page (requires admin role)")
-		log.Println("  POST /logout   - User logout (requires auth)")
-		log.Println("  POST /refresh  - Refresh access token (requires auth)")
+		log.Println("  POST /logout   - User logout (requires access token)")
+		log.Println("  POST /refresh  - Refresh access token (uses refresh token)")
 		log.Println("\nTest with:")
-		log.Println(`  curl -X POST http://localhost:8080/login \`)
+		log.Printf("  curl -X POST http://localhost%s/login \\\n", addr)
 		log.Println(`    -H "Content-Type: application/json" \`)
 		log.Println(`    -d '{"username":"admin","password":"password"}'`)
 		log.Println()
@@ -152,6 +138,46 @@ func main() {
 	}
 
 	log.Println("Server gracefully stopped")
+}
+
+// newJWTProcessor builds the processor from environment-driven configuration.
+// It returns the processor and the access-token TTL expressed in whole seconds
+// (for the "expires_in" response field).
+func newJWTProcessor() (*jwt.Processor, int, error) {
+	secretKey := os.Getenv("JWT_SECRET_KEY")
+	if secretKey == "" {
+		// Demo key - use environment variable in production
+		secretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~jK2#bN5$cM8@xZ7&vB4!"
+		log.Println("WARNING: Using demo secret key - set JWT_SECRET_KEY in production")
+	}
+
+	cfg := jwt.DefaultConfig()
+	cfg.SecretKey = secretKey
+	cfg.AccessTokenTTL = 15 * time.Minute
+	cfg.RefreshTokenTTL = 7 * 24 * time.Hour
+	cfg.Issuer = "web-server-example"
+	cfg.EnableRateLimit = true
+	cfg.RateLimitRate = 100
+	cfg.RateLimitWindow = time.Minute
+	cfg.Blacklist = jwt.BlacklistConfig{
+		MaxSize:           10000,
+		CleanupInterval:   5 * time.Minute,
+		EnableAutoCleanup: true,
+	}
+
+	p, err := jwt.New(cfg)
+	if err != nil {
+		return nil, 0, err
+	}
+	return p, int(cfg.AccessTokenTTL.Seconds()), nil
+}
+
+// envDefault returns the named environment variable, or def when unset or empty.
+func envDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
 // homeHandler serves the home page.
@@ -216,7 +242,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
 		TokenType:    "Bearer",
-		ExpiresIn:    900, // 15 minutes
+		ExpiresIn:    expiresInSeconds,
 		User:         user,
 	}
 
@@ -291,7 +317,7 @@ func refreshHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"access_token": newAccessToken,
 		"token_type":   "Bearer",
-		"expires_in":   900,
+		"expires_in":   expiresInSeconds,
 	})
 }
 

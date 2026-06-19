@@ -19,53 +19,66 @@ type hmacSigningMethod struct {
 	pool     sync.Pool
 }
 
-// hasherEntry wraps a pooled HMAC hasher with its associated key
-// for identity verification on retrieval.
+// hashOutputSize is the largest hash digest produced by any supported algorithm
+// (SHA-512 = 64 bytes, used by HS512/RS512/PS512/ES512). It sizes the reusable
+// Sum output buffer stored on each pooled hasher.
+const hashOutputSize = 64
+
+// hasherBuf wraps a plain hash.Hash (used by the RSA/ECDSA paths) with a
+// reusable Sum output buffer. Co-locating sum with the pooled hasher avoids the
+// per-call [64]byte stack escape that hasher.Sum would otherwise incur — Sum is
+// an interface method, so the compiler conservatively escapes its append
+// argument; a heap-resident buffer (the pooled entry) is not re-allocated.
+type hasherBuf struct {
+	hash.Hash
+	sum [hashOutputSize]byte
+}
+
+// hasherEntry wraps a pooled HMAC hasher with its associated key (for identity
+// verification on retrieval) and a reusable Sum output buffer.
+//
+// sum is heap-resident because the entry is pooled. Passing sum[:0] to
+// hasher.Sum therefore avoids the per-call [64]byte stack escape that a local
+// `var buf [64]byte` incurs — Sum is an interface method, so the compiler
+// conservatively escapes its append argument. Co-locating the scratch buffer
+// with the pooled hasher removes one allocation from every sign and verify.
 type hasherEntry struct {
 	key    []byte
 	hasher hash.Hash
+	sum    [hashOutputSize]byte
 }
 
-// hasherResult pairs a hasher with the key it was created for,
-// so putHasher can reuse the existing key slice instead of allocating a copy.
-type hasherResult struct {
-	hasher hash.Hash
-	key    []byte       // key identity for pool storage
-	entry  *hasherEntry // reused entry struct to avoid allocation in putHasher
-}
-
-func (h *hmacSigningMethod) getHasher(key []byte) hasherResult {
+// getHasher returns a pooled hasherEntry keyed by key. On a key match the entry
+// is reused as-is; on a mismatch or pool miss the entry is (re)built in place,
+// so the returned entry always carries hasher/key consistent with key. Callers
+// must return the entry via putHasher.
+func (h *hmacSigningMethod) getHasher(key []byte) *hasherEntry {
 	if v := h.pool.Get(); v != nil {
 		entry := v.(*hasherEntry)
 		if len(entry.key) == len(key) && subtle.ConstantTimeCompare(entry.key, key) == 1 {
-			return hasherResult{hasher: entry.hasher, key: entry.key, entry: entry}
+			return entry
 		}
+		// Key changed: reuse the entry struct for the new hasher + key copy.
 		ZeroBytes(entry.key)
-		// Reuse the entry struct for the new hasher to avoid allocation in putHasher.
 		keyCopy := make([]byte, len(key))
 		copy(keyCopy, key)
-		return hasherResult{
-			hasher: hmac.New(h.HashFunc.New, key),
-			key:    keyCopy,
-			entry:  entry,
-		}
+		entry.key = keyCopy
+		entry.hasher = hmac.New(h.HashFunc.New, key)
+		return entry
 	}
+	// Pool miss (cold): allocate the entry once; it is reused on every subsequent call.
+	entry := &hasherEntry{}
 	keyCopy := make([]byte, len(key))
 	copy(keyCopy, key)
-	return hasherResult{
-		hasher: hmac.New(h.HashFunc.New, key),
-		key:    keyCopy,
-	}
+	entry.key = keyCopy
+	entry.hasher = hmac.New(h.HashFunc.New, key)
+	return entry
 }
 
-func (h *hmacSigningMethod) putHasher(r hasherResult) {
-	if r.entry != nil {
-		r.entry.key = r.key
-		r.entry.hasher = r.hasher
-		h.pool.Put(r.entry)
-	} else {
-		h.pool.Put(&hasherEntry{key: r.key, hasher: r.hasher})
-	}
+// putHasher returns a hasher entry to the pool. getHasher keeps the entry's
+// hasher/key fields in sync, so there is nothing to repair here.
+func (h *hmacSigningMethod) putHasher(entry *hasherEntry) {
+	h.pool.Put(entry)
 }
 
 func (h *hmacSigningMethod) Verify(signingString string, signature string, key any) error {
@@ -73,7 +86,18 @@ func (h *hmacSigningMethod) Verify(signingString string, signature string, key a
 	if !ok {
 		return errors.New("invalid key type: HMAC requires []byte key")
 	}
+	return h.verify(signingString, signature, keyBytes)
+}
 
+// VerifyHMAC is a type-specialized variant of Verify that accepts []byte directly,
+// avoiding the interface boxing overhead.
+func (h *hmacSigningMethod) VerifyHMAC(signingString string, signature string, key []byte) error {
+	return h.verify(signingString, signature, key)
+}
+
+// verify holds the shared verification body. Callers pass key as []byte so the
+// HMAC-specialized path (VerifyHMAC) avoids the any-boxing that Verify incurs.
+func (h *hmacSigningMethod) verify(signingString string, signature string, key []byte) error {
 	if !h.HashFunc.Available() {
 		return fmt.Errorf("hash function %v not available", h.HashFunc)
 	}
@@ -95,50 +119,13 @@ func (h *hmacSigningMethod) Verify(signingString string, signature string, key a
 		return errors.New("signature verification failed")
 	}
 
-	hr := h.getHasher(keyBytes)
-	defer h.putHasher(hr)
-	hr.hasher.Reset()
-	hr.hasher.Write(stringToBytes(signingString))
+	e := h.getHasher(key)
+	defer h.putHasher(e)
+	e.hasher.Reset()
+	e.hasher.Write(stringToBytes(signingString))
 
-	// Stack-allocated hash output buffer
-	var hashBuf [64]byte
-	if !hmac.Equal(sigBytes, hr.hasher.Sum(hashBuf[:0])) {
-		return errors.New("signature verification failed")
-	}
-
-	return nil
-}
-
-// VerifyHMAC is a type-specialized variant of Verify that accepts []byte directly,
-// avoiding the interface boxing overhead.
-func (h *hmacSigningMethod) VerifyHMAC(signingString string, signature string, key []byte) error {
-	if !h.HashFunc.Available() {
-		return fmt.Errorf("hash function %v not available", h.HashFunc)
-	}
-
-	var sigBuf [64]byte
-	decodedLen := base64.RawURLEncoding.DecodedLen(len(signature))
-	if decodedLen > len(sigBuf) {
-		return errors.New("signature verification failed")
-	}
-	sigBytes := sigBuf[:decodedLen]
-	n, err := base64.RawURLEncoding.Decode(sigBytes, stringToBytes(signature))
-	if err != nil {
-		return fmt.Errorf("failed to decode signature: %w", err)
-	}
-	sigBytes = sigBytes[:n]
-
-	if len(sigBytes) != h.HashFunc.Size() {
-		return errors.New("signature verification failed")
-	}
-
-	hr := h.getHasher(key)
-	defer h.putHasher(hr)
-	hr.hasher.Reset()
-	hr.hasher.Write(stringToBytes(signingString))
-
-	var hashBuf [64]byte
-	if !hmac.Equal(sigBytes, hr.hasher.Sum(hashBuf[:0])) {
+	// e.sum is heap-resident (pooled entry), so Sum does not escape a stack buffer.
+	if !hmac.Equal(sigBytes, e.hasher.Sum(e.sum[:0])) {
 		return errors.New("signature verification failed")
 	}
 
@@ -167,41 +154,27 @@ func (h *hmacSigningMethod) SignTo(dst []byte, signingString string, key any) (i
 	if !ok {
 		return 0, errors.New("invalid key type: HMAC requires []byte key")
 	}
-
-	if !h.HashFunc.Available() {
-		return 0, fmt.Errorf("hash function %v not available", h.HashFunc)
-	}
-
-	hr := h.getHasher(keyBytes)
-	defer h.putHasher(hr)
-	hr.hasher.Reset()
-	hr.hasher.Write(stringToBytes(signingString))
-
-	var hashBuf [64]byte
-	hashed := hr.hasher.Sum(hashBuf[:0])
-
-	encodedLen := base64.RawURLEncoding.EncodedLen(len(hashed))
-	if len(dst) < encodedLen {
-		return 0, fmt.Errorf("signature buffer too small: need %d, have %d", encodedLen, len(dst))
-	}
-	base64.RawURLEncoding.Encode(dst[:encodedLen], hashed)
-	return encodedLen, nil
+	return h.signTo(dst, signingString, keyBytes)
 }
 
 // SignToHMAC is a type-specialized variant of SignTo that accepts []byte directly,
 // avoiding the interface boxing overhead that causes key escape.
 func (h *hmacSigningMethod) SignToHMAC(dst []byte, signingString string, key []byte) (int, error) {
+	return h.signTo(dst, signingString, key)
+}
+
+// signTo holds the shared signing body (see verify for the []byte-key rationale).
+func (h *hmacSigningMethod) signTo(dst []byte, signingString string, key []byte) (int, error) {
 	if !h.HashFunc.Available() {
 		return 0, fmt.Errorf("hash function %v not available", h.HashFunc)
 	}
 
-	hr := h.getHasher(key)
-	defer h.putHasher(hr)
-	hr.hasher.Reset()
-	hr.hasher.Write(stringToBytes(signingString))
+	e := h.getHasher(key)
+	defer h.putHasher(e)
+	e.hasher.Reset()
+	e.hasher.Write(stringToBytes(signingString))
 
-	var hashBuf [64]byte
-	hashed := hr.hasher.Sum(hashBuf[:0])
+	hashed := e.hasher.Sum(e.sum[:0])
 
 	encodedLen := base64.RawURLEncoding.EncodedLen(len(hashed))
 	if len(dst) < encodedLen {

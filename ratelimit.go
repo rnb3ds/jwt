@@ -1,6 +1,7 @@
 package jwt
 
 import (
+	"sort"
 	"sync"
 	"time"
 )
@@ -78,7 +79,11 @@ func (rl *RateLimiter) AllowN(key string, n int) bool {
 		if len(rl.buckets) >= rl.maxBuckets {
 			rl.evictExpiredUnsafe(nowNano)
 			if len(rl.buckets) >= rl.maxBuckets {
-				rl.evictOldestUnsafe()
+				// Batch-evict the oldest ~10% (at least 1) so the full map is not
+				// scanned on every insert while at capacity. Mirrors the blacklist
+				// store's eviction strategy and amortizes the O(n) scan across
+				// many inserts rather than paying it per insert.
+				rl.evictOldestUnsafe(max(rl.maxBuckets/10, 1))
 			}
 		}
 		rl.buckets[key] = &bucket{
@@ -151,22 +156,31 @@ func (rl *RateLimiter) evictExpiredUnsafe(nowNano int64) {
 	}
 }
 
-func (rl *RateLimiter) evictOldestUnsafe() {
-	if len(rl.buckets) == 0 {
+// evictOldestUnsafe removes the count buckets with the oldest lastRefill in a
+// single pass. Evicting a batch (rather than one at a time) amortizes the O(n)
+// scan: at capacity this makes room for ~10% of maxBuckets inserts before the
+// next scan, turning per-insert eviction from O(n) into amortized O(log n).
+func (rl *RateLimiter) evictOldestUnsafe(count int) {
+	bucketsLen := len(rl.buckets)
+	if bucketsLen == 0 || count <= 0 {
 		return
 	}
-
-	var oldestKey string
-	oldestTime := int64(1<<63 - 1)
-
-	for key, b := range rl.buckets {
-		if b.lastRefill < oldestTime {
-			oldestKey = key
-			oldestTime = b.lastRefill
-		}
+	if count > bucketsLen {
+		count = bucketsLen
 	}
 
-	if oldestKey != "" {
-		delete(rl.buckets, oldestKey)
+	type entry struct {
+		key string
+		ts  int64
+	}
+	entries := make([]entry, 0, bucketsLen)
+	for key, b := range rl.buckets {
+		entries = append(entries, entry{key, b.lastRefill})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].ts < entries[j].ts
+	})
+	for i := 0; i < count; i++ {
+		delete(rl.buckets, entries[i].key)
 	}
 }

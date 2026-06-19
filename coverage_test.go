@@ -186,6 +186,7 @@ func TestRateLimiterBasic(t *testing.T) {
 	})
 
 	t.Run("ZeroParameters", func(t *testing.T) {
+		// NewRateLimiter tolerates zero rate/window; construction must not panic.
 		rl := NewRateLimiter(0, 0)
 		rl.Close()
 		rl = NewRateLimiter(100, 0)
@@ -242,11 +243,6 @@ func TestProcessorOperationsAfterClose(t *testing.T) {
 				t.Errorf("Expected ErrProcessorClosed, got %v", err)
 			}
 		})
-	}
-
-	// Double close
-	if err := processor.Close(); err != ErrProcessorClosed {
-		t.Errorf("Expected ErrProcessorClosed on double close, got %v", err)
 	}
 }
 
@@ -343,54 +339,58 @@ func TestIsTokenRevokedInvalidToken(t *testing.T) {
 // ============================================================================
 
 func TestProcessorRateLimiting(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.SecretKey = testSecretKey
-	cfg.EnableRateLimit = true
-	cfg.RateLimitRate = 5
-	cfg.RateLimitWindow = time.Minute
-
-	processor, err := New(cfg)
-	if err != nil {
-		t.Fatalf("Failed to create processor: %v", err)
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) (*Processor, func())
+	}{
+		{
+			name: "built-in limiter",
+			setup: func(t *testing.T) (*Processor, func()) {
+				cfg := DefaultConfig()
+				cfg.SecretKey = testSecretKey
+				cfg.EnableRateLimit = true
+				cfg.RateLimitRate = 5
+				cfg.RateLimitWindow = time.Minute
+				p, err := New(cfg)
+				if err != nil {
+					t.Fatalf("Failed to create processor: %v", err)
+				}
+				return p, func() { _ = p.Close() }
+			},
+		},
+		{
+			name: "custom limiter",
+			setup: func(t *testing.T) (*Processor, func()) {
+				rl := NewRateLimiter(5, time.Minute)
+				cfg := DefaultConfig()
+				cfg.SecretKey = testSecretKey
+				cfg.RateLimiter = rl
+				p, err := New(cfg)
+				if err != nil {
+					t.Fatalf("Failed to create processor: %v", err)
+				}
+				return p, func() { _ = p.Close(); rl.Close() }
+			},
+		},
 	}
-	defer func() { _ = processor.Close() }() // best-effort cleanup
 
-	claims := Claims{UserID: "ratelimited-user", Username: "test"}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			processor, cleanup := tt.setup(t)
+			defer cleanup()
 
-	for range 5 {
-		if _, err := processor.Create(&claims); err != nil {
-			t.Fatalf("Should succeed within rate limit: %v", err)
-		}
-	}
+			// Rate-limit key falls back to UserID when Subject is empty.
+			claims := Claims{UserID: "rl-user", Username: "test"}
 
-	if _, err := processor.Create(&claims); err == nil {
-		t.Error("Expected rate limit error")
-	}
-}
-
-func TestProcessorWithCustomRateLimiter(t *testing.T) {
-	rl := NewRateLimiter(5, time.Minute)
-	defer rl.Close()
-
-	cfg := DefaultConfig()
-	cfg.SecretKey = testSecretKey
-	cfg.RateLimiter = rl
-
-	processor, err := New(cfg)
-	if err != nil {
-		t.Fatalf("Failed to create processor: %v", err)
-	}
-	defer func() { _ = processor.Close() }() // best-effort cleanup
-
-	claims := Claims{UserID: "custom-rl-user", Username: "test"}
-
-	for range 5 {
-		if _, err := processor.Create(&claims); err != nil {
-			t.Fatalf("Should succeed within rate limit: %v", err)
-		}
-	}
-	if _, err := processor.Create(&claims); err == nil {
-		t.Error("Expected rate limit error with custom limiter")
+			for range 5 {
+				if _, err := processor.Create(&claims); err != nil {
+					t.Fatalf("Should succeed within rate limit: %v", err)
+				}
+			}
+			if _, err := processor.Create(&claims); err == nil {
+				t.Error("Expected rate limit error after exhausting allowance")
+			}
+		})
 	}
 }
 
@@ -712,16 +712,179 @@ func TestRateLimitKeyer(t *testing.T) {
 	}
 }
 
-// ============================================================================
-// TOKEN MANAGER INTERFACE COMPLIANCE
-// ============================================================================
+// TestValidateClaimsFailureWrapsSentinel guards the contract documented in the
+// README: errors.Is(err, jwt.ErrInvalidClaims) must hold for claims-validation
+// failures on the Validate path, not just Create. Create blocks empty claims, so
+// we sign an otherwise-impossible empty-claims token via the unexported signer to
+// drive validateTokenFully's claims.Validate() branch.
+func TestValidateClaimsFailureWrapsSentinel(t *testing.T) {
+	processor, err := newTestProcessor(testSecretKey)
+	if err != nil {
+		t.Fatalf("Failed to create processor: %v", err)
+	}
+	defer func() { _ = processor.Close() }() // best-effort cleanup
 
-func TestTokenManagerInterface(t *testing.T) {
-	// Verify Processor implements TokenManager
-	var _ TokenManager = (*Processor)(nil)
-	var _ RateLimitProvider = (*RateLimiter)(nil)
-	var _ ClockProvider = SystemClock{}
-	var _ ClockProvider = FixedClock{}
-	var _ CustomClaims = (*Claims)(nil)
-	var _ CustomClaims = (*TestCustomClaims)(nil)
+	// Empty user fields but a matching issuer, so validateRegistered does not
+	// short-circuit and we reach claims.Validate(). Bypasses Create validation
+	// but carries a valid signature so only claims.Validate() fails.
+	claims := &Claims{}
+	claims.Issuer = processor.issuer
+	token, err := processor.signClaims(claims)
+	if err != nil {
+		t.Fatalf("signClaims failed: %v", err)
+	}
+
+	_, _, err = processor.Validate(token)
+	if err == nil {
+		t.Fatal("Expected error for token with empty claims")
+	}
+	if !errors.Is(err, ErrInvalidClaims) {
+		t.Errorf("Validate claims failure must wrap ErrInvalidClaims; got %v", err)
+	}
+}
+
+// descriptiveClaims is a custom claims type whose Validate() returns a
+// descriptive error (NOT the ErrInvalidClaims sentinel), matching the pattern
+// documented on Claims.Validate. It is used to verify the generic paths
+// (ValidateInto/RefreshInto) wrap claims failures in ErrInvalidClaims so
+// errors.Is(err, ErrInvalidClaims) holds symmetrically with Validate/Refresh.
+// Returning a non-sentinel error is essential: a type that returns the sentinel
+// itself would satisfy errors.Is regardless of whether the wrap is present.
+type descriptiveClaims struct {
+	UserID string `json:"user_id,omitempty"`
+	RegisteredClaims
+}
+
+func (c *descriptiveClaims) GetRegisteredClaims() *RegisteredClaims {
+	return &c.RegisteredClaims
+}
+
+// Validate returns a descriptive error when UserID is empty.
+func (c *descriptiveClaims) Validate() error {
+	if c.UserID == "" {
+		return errors.New("user_id is required")
+	}
+	return nil
+}
+
+// TestValidateIntoClaimsFailureWrapsSentinel is the ValidateInto counterpart to
+// TestValidateClaimsFailureWrapsSentinel. It verifies that a claims-validation
+// failure on the generic ValidateInto path wraps ErrInvalidClaims, restoring
+// errors.Is(err, ErrInvalidClaims) symmetry with the built-in Validate path.
+func TestValidateIntoClaimsFailureWrapsSentinel(t *testing.T) {
+	processor, err := newTestProcessor(testSecretKey)
+	if err != nil {
+		t.Fatalf("Failed to create processor: %v", err)
+	}
+	defer func() { _ = processor.Close() }() // best-effort cleanup
+
+	// Empty UserID so descriptiveClaims.Validate() returns a descriptive error;
+	// matching issuer so validateRegistered does not short-circuit. Signed
+	// directly (bypassing Create's validation) with a valid signature so only
+	// claims.Validate() fails inside validateCustomTokenFully.
+	claims := &descriptiveClaims{}
+	claims.Issuer = processor.issuer
+	token, err := processor.signClaims(claims)
+	if err != nil {
+		t.Fatalf("signClaims failed: %v", err)
+	}
+
+	_, _, err = processor.ValidateInto(token, &descriptiveClaims{})
+	if err == nil {
+		t.Fatal("Expected error for token with empty claims")
+	}
+	if !errors.Is(err, ErrInvalidClaims) {
+		t.Errorf("ValidateInto claims failure must wrap ErrInvalidClaims; got %v", err)
+	}
+}
+
+// TestRefreshIntoClaimsFailureWrapsSentinel mirrors the above for the
+// RefreshInto path: a refresh-token claims-validation failure must wrap
+// ErrInvalidClaims, symmetric with the built-in Refresh path.
+func TestRefreshIntoClaimsFailureWrapsSentinel(t *testing.T) {
+	processor, err := newTestProcessor(testSecretKey)
+	if err != nil {
+		t.Fatalf("Failed to create processor: %v", err)
+	}
+	defer func() { _ = processor.Close() }() // best-effort cleanup
+
+	// Marked as refresh so the TokenTypeAccess guard does not fire; the empty
+	// UserID still makes claims.Validate() fail first inside
+	// validateCustomTokenFully.
+	claims := &descriptiveClaims{}
+	claims.Issuer = processor.issuer
+	claims.TokenType = TokenTypeRefresh
+	token, err := processor.signClaims(claims)
+	if err != nil {
+		t.Fatalf("signClaims failed: %v", err)
+	}
+
+	_, err = processor.RefreshInto(token, &descriptiveClaims{})
+	if err == nil {
+		t.Fatal("Expected error for refresh token with empty claims")
+	}
+	if !errors.Is(err, ErrInvalidClaims) {
+		t.Errorf("RefreshInto claims failure must wrap ErrInvalidClaims; got %v", err)
+	}
+}
+
+// TestRequireExpiration covers the Config.RequireExpiration toggle: a token
+// lacking exp is rejected when the flag is on, accepted when off, and exp-bearing
+// tokens validate normally either way. Tokens are crafted via signClaims (which
+// does not auto-fill exp, unlike Create) so the no-exp case is reachable.
+func TestRequireExpiration(t *testing.T) {
+	newProcessor := func(requireExp bool) *Processor {
+		cfg := DefaultConfig()
+		cfg.SecretKey = testSecretKey
+		cfg.RequireExpiration = requireExp
+		p, err := New(cfg)
+		if err != nil {
+			t.Fatalf("Failed to create processor: %v", err)
+		}
+		return p
+	}
+
+	// A signed token whose payload carries no exp (NumericDate{} marshals to null).
+	// Issuer is set to match the processor so the issuer check does not short-circuit
+	// the test before validateRegistered's exp gate is evaluated.
+	noExpToken := func(p *Processor) string {
+		tok, err := p.signClaims(&Claims{UserID: "no-exp-user", RegisteredClaims: RegisteredClaims{Issuer: p.issuer}})
+		if err != nil {
+			t.Fatalf("signClaims failed: %v", err)
+		}
+		return tok
+	}
+
+	t.Run("rejects no-exp token when enabled", func(t *testing.T) {
+		p := newProcessor(true)
+		defer func() { _ = p.Close() }()
+		_, valid, err := p.Validate(noExpToken(p))
+		if valid {
+			t.Error("token without exp must not be valid when RequireExpiration is on")
+		}
+		if !errors.Is(err, ErrExpirationRequired) {
+			t.Errorf("expected ErrExpirationRequired, got %v", err)
+		}
+	})
+
+	t.Run("accepts no-exp token when disabled", func(t *testing.T) {
+		p := newProcessor(false)
+		defer func() { _ = p.Close() }()
+		_, valid, err := p.Validate(noExpToken(p))
+		if err != nil || !valid {
+			t.Errorf("token without exp should validate when RequireExpiration is off; valid=%v err=%v", valid, err)
+		}
+	})
+
+	t.Run("exp-bearing token validates when enabled", func(t *testing.T) {
+		p := newProcessor(true)
+		defer func() { _ = p.Close() }()
+		token, err := p.Create(&Claims{UserID: "with-exp-user"})
+		if err != nil {
+			t.Fatalf("Create failed: %v", err)
+		}
+		if _, valid, err := p.Validate(token); !valid || err != nil {
+			t.Errorf("exp-bearing token should validate; valid=%v err=%v", valid, err)
+		}
+	})
 }

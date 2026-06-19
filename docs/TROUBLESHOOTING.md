@@ -198,20 +198,21 @@ cfg.SigningMethod = jwt.SigningMethodRS256
 
 **Symptoms:** Blacklist settings not taking effect.
 
-**Cause:** Not passing config properly.
+**Cause:** The built-in blacklist store normalizes zero-valued fields. `normalizeConfig` fills `MaxSize` and `CleanupInterval` from defaults when left at zero, and **forces `EnableAutoCleanup` to `true`** for the built-in store regardless of what you set (this prevents unbounded memory growth). So setting `EnableAutoCleanup = false` has no effect unless you supply a custom `BlacklistStore`.
 
 **Solution:**
 ```go
-// ❌ Wrong - creating new blacklist config
-cfg := jwt.Config{SecretKey: key}
-
-// ✅ Correct - using DefaultConfig or setting Blacklist
+// Both forms work — normalizeConfig applies blacklist defaults automatically:
 cfg := jwt.DefaultConfig()
 cfg.SecretKey = key
-cfg.Blacklist = jwt.BlacklistConfig{
-    MaxSize:         50000,
-    CleanupInterval: 10 * time.Minute,
-}
+cfg.Blacklist.MaxSize = 50000
+cfg.Blacklist.CleanupInterval = 10 * time.Minute
+
+// or, starting from a zero Config (defaults are still applied):
+cfg := jwt.Config{SecretKey: key}
+
+// To truly disable auto-cleanup, provide a custom store instead:
+// cfg.Blacklist.Store = myStore
 ```
 
 ---
@@ -535,9 +536,9 @@ func createSession(processor *jwt.Processor, userID string, rememberMe bool) (*S
         return nil, err
     }
 
-    // For "remember me", create a longer-lived refresh token
-    // by temporarily adjusting the processor configuration.
-    // Alternatively, create a second processor with a longer RefreshTokenTTL.
+    // For "remember me", create a longer-lived refresh token using a separate
+    // processor with a longer RefreshTokenTTL. The Processor is immutable after
+    // New(), so you cannot adjust an existing processor's TTL.
     if rememberMe {
         rememberCfg := jwt.DefaultConfig()
         rememberCfg.SecretKey = os.Getenv("JWT_SECRET_KEY")

@@ -123,8 +123,9 @@ The library enforces internal limits to prevent DoS attacks:
 
 | Limit | Value | Description |
 |-------|-------|-------------|
-| `maxTokenLength` | 8192 | Maximum token size in bytes (internal) |
-| `maxSegmentLength` | 4096 | Maximum base64 segment size (internal) |
+| `maxTokenLength` | 131072 | Maximum token size in bytes (internal) |
+| `maxSegmentLength` | 87384 | Maximum base64 segment size (internal) |
+| `maxDecodedSize` | 65536 | Maximum decoded payload size (internal) |
 | `MaxSize` | 100000 | Default maximum blacklist entries |
 
 ### Rate Limiting
@@ -133,7 +134,7 @@ Enable rate limiting to protect against abuse:
 
 ```go
 cfg := jwt.DefaultConfig()
-cfg.SecretKey = "your-secret-key-at-least-32-bytes-long!!"
+cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
 cfg.EnableRateLimit = true
 cfg.RateLimitRate = 100
 cfg.RateLimitWindow = time.Minute
@@ -171,7 +172,7 @@ if err != nil {
 
 ```go
 cfg := jwt.DefaultConfig()
-cfg.SecretKey = "your-secret-key-at-least-32-bytes-long!!"
+cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
 cfg.Blacklist = jwt.BlacklistConfig{
     MaxSize:           100000,
     CleanupInterval:   5 * time.Minute,
@@ -231,13 +232,14 @@ The library enforces strict algorithm validation:
 - Rejects "none" algorithm tokens
 - Supports HMAC: HS256, HS384, HS512
 - Supports RSA: RS256, RS384, RS512
+- Supports RSA-PSS: PS256, PS384, PS512
 - Supports ECDSA: ES256, ES384, ES512
 - Validates algorithm in token header matches configured algorithm
 - Prevents algorithm confusion attacks
 
 ```go
 cfg := jwt.DefaultConfig()
-cfg.SecretKey = "your-secret-key-at-least-32-bytes-long!!"
+cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
 cfg.SigningMethod = jwt.SigningMethodHS256
 
 processor, err := jwt.New(cfg)
@@ -291,7 +293,7 @@ if secretKey == "" {
 
 ```go
 cfg := jwt.DefaultConfig()
-cfg.SecretKey = "your-secret-key-at-least-32-bytes-long!!"
+cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
 cfg.AccessTokenTTL = 15 * time.Minute
 cfg.RefreshTokenTTL = 7 * 24 * time.Hour
 

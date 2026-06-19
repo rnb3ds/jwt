@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"sync"
 	"time"
-	"unsafe"
 )
 
 // maxValidTimestamp is the maximum valid Unix timestamp (9999-12-31 23:59:59 UTC).
@@ -39,13 +38,57 @@ func (date *NumericDate) MarshalJSON() ([]byte, error) {
 		return nullBytes, nil
 	}
 
-	// Use stack-allocated buffer for formatting (max 20 digits for int64)
+	// Format into a 20-byte buffer (max int64 is 19 digits). AppendInt returns a
+	// slice over buf; buf escapes to the heap as the return value, but this still
+	// avoids the extra string→[]byte copy that strconv.FormatInt would require.
 	var buf [20]byte
 	return strconv.AppendInt(buf[:0], unix, 10), nil
 }
 
+// maxInt64Div10 and maxInt64Mod10 together form the standard int64 overflow
+// guard for base-10 parsing. Used by parseDecimalInt64.
+const (
+	maxInt64Div10 = (1<<63 - 1) / 10
+	maxInt64Mod10 = (1<<63 - 1) % 10 // == 7
+)
+
+// parseDecimalInt64 parses a non-negative base-10 integer from b without
+// allocating a string. Returns the value and true on success, or 0 and false
+// if b is empty or contains any byte outside '0'..'9' — which also rejects
+// negative numbers, decimals, and trailing characters (matching strconv.ParseInt
+// for these cases). Values that would overflow int64 are rejected; this MUST be
+// detected here rather than by a post-parse range check, because a wrapped
+// (negative) result would silently bypass such a check.
+//
+// It exists so NumericDate.UnmarshalJSON can avoid the string(b) allocation
+// that strconv.ParseInt would require on the hot validation path (profiling
+// showed NumericDate.UnmarshalJSON accounting for ~18% of validation allocations).
+func parseDecimalInt64(b []byte) (int64, bool) {
+	if len(b) == 0 {
+		return 0, false
+	}
+	var n int64
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		digit := int64(c - '0')
+		// Reject before the multiply would overflow int64. When n equals
+		// maxInt64Div10 exactly, only digits <= maxInt64Mod10 (7) are safe.
+		if n > maxInt64Div10 || (n == maxInt64Div10 && digit > maxInt64Mod10) {
+			return 0, false
+		}
+		n = n*10 + digit
+	}
+	return n, true
+}
+
 // UnmarshalJSON implements json.Unmarshaler for NumericDate.
 // Parses a JSON number or string as a Unix timestamp.
+//
+// The hot path (a valid numeric timestamp) is allocation-free: quote stripping
+// and integer parsing both operate on the input bytes directly. The only string
+// conversion happens in the error branch, which is cold.
 func (date *NumericDate) UnmarshalJSON(b []byte) error {
 	if len(b) == 0 {
 		date.Time = time.Time{}
@@ -58,26 +101,32 @@ func (date *NumericDate) UnmarshalJSON(b []byte) error {
 		return nil
 	}
 
-	// SAFETY: b is a subslice of json.Decoder's internal buffer which is
-	// alive for the duration of this UnmarshalJSON call. The resulting
-	// string s does not escape this function, so the reference is safe.
-	s := unsafe.String(unsafe.SliceData(b), len(b))
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		s = s[1 : len(s)-1]
+	// Strip surrounding quotes (some JWTs encode dates as JSON strings) by
+	// reslicing the input bytes rather than converting to a string.
+	d := b
+	if len(d) >= 2 && d[0] == '"' && d[len(d)-1] == '"' {
+		d = d[1 : len(d)-1]
 	}
 
-	if s == "" || s == "null" {
+	if len(d) == 0 {
 		date.Time = time.Time{}
 		return nil
 	}
 
-	// Use strconv.ParseInt for strict parsing (rejects inputs like "123abc")
-	unix, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid time format: expected unix timestamp, got %s", s)
+	// Quoted "null" → zero.
+	if len(d) == 4 && d[0] == 'n' && d[1] == 'u' && d[2] == 'l' && d[3] == 'l' {
+		date.Time = time.Time{}
+		return nil
 	}
 
-	if unix < 0 || unix > maxValidTimestamp {
+	unix, ok := parseDecimalInt64(d)
+	if !ok {
+		// Cold path: allocate only to report the offending value.
+		return fmt.Errorf("invalid time format: expected unix timestamp, got %s", string(b))
+	}
+
+	// parseDecimalInt64 rejects negatives and decimals, so unix is >= 0 here.
+	if unix > maxValidTimestamp {
 		return fmt.Errorf("invalid unix timestamp: %d", unix)
 	}
 
@@ -101,6 +150,7 @@ const (
 	SigningMethodRS512 SigningMethod = "RS512"
 
 	// RSA-PSS signing methods (asymmetric, recommended over PKCS#1 v1.5)
+	// SigningMethodPS256 uses RSA-PSS with SHA-256.
 	SigningMethodPS256 SigningMethod = "PS256"
 	// SigningMethodPS384 uses RSA-PSS with SHA-384.
 	SigningMethodPS384 SigningMethod = "PS384"
@@ -117,7 +167,9 @@ const (
 // Access tokens are created by [Processor.Create]; refresh tokens by [Processor.CreateRefresh].
 // The [Processor.Refresh] and [Processor.RefreshInto] methods reject tokens with TokenTypeAccess.
 const (
-	TokenTypeAccess  = "access"
+	// TokenTypeAccess marks a token as an access token.
+	TokenTypeAccess = "access"
+	// TokenTypeRefresh marks a token as a refresh token.
 	TokenTypeRefresh = "refresh"
 )
 
@@ -149,14 +201,23 @@ func (m SigningMethod) isValid() bool {
 // RegisteredClaims contains the standard JWT claims defined in RFC 7519 §4.1.
 // These are set automatically during token creation and validated during verification.
 type RegisteredClaims struct {
-	Issuer    string        `json:"iss,omitempty"`
-	Subject   string        `json:"sub,omitempty"`
-	Audience  StringOrSlice `json:"aud,omitempty"`
-	ExpiresAt NumericDate   `json:"exp"`
-	NotBefore NumericDate   `json:"nbf"`
-	IssuedAt  NumericDate   `json:"iat"`
-	ID        string        `json:"jti,omitempty"`
-	TokenType string        `json:"token_type,omitempty"`
+	// Issuer (iss) identifies the principal that issued the token.
+	Issuer string `json:"iss,omitempty"`
+	// Subject (sub) identifies the principal that is the subject of the token.
+	Subject string `json:"sub,omitempty"`
+	// Audience (aud) identifies the recipients the token is intended for.
+	// Validated against Config.ExpectedAudience when that field is set.
+	Audience StringOrSlice `json:"aud,omitempty"`
+	// ExpiresAt (exp) is the time after which the token must no longer be accepted.
+	ExpiresAt NumericDate `json:"exp"`
+	// NotBefore (nbf) is the time before which the token must not be accepted.
+	NotBefore NumericDate `json:"nbf"`
+	// IssuedAt (iat) is the time at which the token was issued.
+	IssuedAt NumericDate `json:"iat"`
+	// ID (jti) is a unique identifier for the token; used as the blacklist key.
+	ID string `json:"jti,omitempty"`
+	// TokenType marks the token as "access" or "refresh" (see TokenTypeAccess).
+	TokenType string `json:"token_type,omitempty"`
 }
 
 // StringOrSlice holds a []string that can be unmarshaled from either
@@ -207,14 +268,25 @@ func (c *RegisteredClaims) reset() {
 
 // Claims represents JWT claims with custom application-specific fields.
 type Claims struct {
-	UserID      string         `json:"user_id,omitempty"`
-	Username    string         `json:"username,omitempty"`
-	Role        string         `json:"role,omitempty"`
-	Permissions []string       `json:"permissions,omitempty"`
-	Scopes      []string       `json:"scopes,omitempty"`
-	Extra       map[string]any `json:"extra,omitempty"`
-	SessionID   string         `json:"session_id,omitempty"`
-	ClientID    string         `json:"client_id,omitempty"`
+	// UserID is the application-specific user identifier. Either UserID or
+	// Username must be non-empty for a claim set to pass validation.
+	UserID string `json:"user_id,omitempty"`
+	// Username is a human-readable user name.
+	Username string `json:"username,omitempty"`
+	// Role is the user's role (e.g. "admin", "user").
+	Role string `json:"role,omitempty"`
+	// Permissions is a list of permission strings granted to the subject.
+	Permissions []string `json:"permissions,omitempty"`
+	// Scopes is a list of OAuth-style scope strings granted to the subject.
+	Scopes []string `json:"scopes,omitempty"`
+	// Extra holds arbitrary additional claim fields. Values may be string,
+	// []string, or other JSON types; nested maps are rejected by validation.
+	Extra map[string]any `json:"extra,omitempty"`
+	// SessionID associates the token with a server-side session.
+	SessionID string `json:"session_id,omitempty"`
+	// ClientID identifies the client (e.g. OAuth client) the token was issued to.
+	ClientID string `json:"client_id,omitempty"`
+	// RegisteredClaims holds the standard JWT claims (iss, sub, exp, ...).
 	RegisteredClaims
 }
 

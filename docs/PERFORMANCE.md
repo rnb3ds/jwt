@@ -17,22 +17,25 @@ This guide covers performance characteristics, optimization techniques, and benc
 
 ### Benchmark Results (Go 1.25, Intel Ultra 9 185H)
 
+Representative figures (laptop CPUs vary ~15-20% run-to-run from thermal
+throttling; allocations are deterministic). HMAC-SHA256 (HS256), minimal claims.
+
 | Operation | Time | Memory | Allocations |
 |-----------|------|--------|-------------|
-| Token Creation | ~4.6µs | ~1.8KB | 19 allocs |
-| Token Validation | ~5.0µs | ~2.3KB | 41 allocs |
-| Create + Validate | ~9.8µs | ~3.6KB | 56 allocs |
-| Concurrent Creation | ~1.2µs | ~1.8KB | 19 allocs |
-| Concurrent Validation | ~1.0µs | ~2.4KB | 43 allocs |
-| Blacklist Operations | ~2.9µs | ~1.4KB | 21 allocs |
+| Token Creation | ~2.4µs | ~451 B | 4 allocs |
+| Token Validation | ~3.8µs | ~337 B | 11 allocs |
+| Create + Validate | ~6.8µs | ~792 B | 15 allocs |
+| Concurrent Creation | ~620ns | ~460 B | 4 allocs |
+| Concurrent Validation | ~800ns | ~340 B | 11 allocs |
+| Blacklist Validation | ~3.5µs | ~337 B | 11 allocs |
 
 ### Throughput
 
 | Scenario | Operations/sec |
 |----------|----------------|
-| Single-threaded token creation | ~210,000 |
-| Single-threaded validation | ~200,000 |
-| Concurrent operations (22 cores) | ~800,000+ |
+| Single-threaded token creation | ~420,000 |
+| Single-threaded validation | ~260,000 |
+| Concurrent operations (22 cores) | ~1,000,000+ |
 
 ### Algorithm Comparison
 
@@ -91,7 +94,7 @@ go test -race -bench=. -benchmem ./...
 ```go
 func BenchmarkMyUseCase(b *testing.B) {
     cfg := jwt.DefaultConfig()
-    cfg.SecretKey = "benchmark-secret-key-32-bytes-minimum!!"
+    cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
     processor, _ := jwt.New(cfg)
     defer processor.Close()
 
@@ -142,6 +145,27 @@ The library uses `sync.Pool` for frequently allocated objects:
 2. **Buffer Pooling**: Signing buffers are pooled via `sync.Pool`
 3. **Claims Pooling**: Claims objects are pooled for reuse
 
+### Parse-Path CPU Fast-Paths
+
+Profiling (baseline → pprof → optimize → verify) drove these validate-path
+optimizations. Together they cut `BenchmarkTokenValidation` ~11% (interleaved
+A/B, both orderings) with no change in allocations, which remain at the
+`encoding/json` reflect-decode floor:
+
+1. **SIMD token split**: `fastSplit3` uses `strings.IndexByte` (vectorized on
+   amd64/arm64) instead of a byte-by-byte loop to find the two `.` separators —
+   ~2.3x faster in isolation.
+2. **Insecure-algorithm fast path**: `isInsecureAlgorithm` short-circuits on the
+   read-only method registry (`globalMethods`), so the common case — a valid
+   standard algorithm — returns in one O(1) lookup instead of an 11-entry
+   case-insensitive scan on every validation.
+
+The remaining validate CPU is fundamental: `encoding/json` reflect decoding
+(`decodeState.object`, `checkValid`) and the SHA-256 HMAC. A controlled
+micro-benchmark showed `json.NewDecoder` is *slower* and allocates *more* than
+`json.Unmarshal` for these small payloads, so no further stdlib win is available
+without a third-party JSON library (not used here) or custom claims marshaling.
+
 ---
 
 ## Optimization Techniques
@@ -172,7 +196,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 ```go
 cfg := jwt.DefaultConfig()
-cfg.SecretKey = "your-secret-key"
+cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
 
 // Disable rate limiting if not needed
 cfg.EnableRateLimit = false

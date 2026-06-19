@@ -1,6 +1,7 @@
 package jwt
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -62,7 +63,18 @@ type RateLimitKeyer interface {
 // Uses deep validation for built-in Claims, standard Validate() plus
 // registered claims string sanitization for other types.
 func validateCustomClaims(claims CustomClaims) error {
+	// Nil guard: a nil claims value (nil interface or typed-nil *Claims) would
+	// panic on the Validate/GetRegisteredClaims calls below. Return an error so
+	// the public Create/CreateRefresh API never panics on misuse. ValidateInto
+	// and RefreshInto are already protected separately — json.Unmarshal rejects a
+	// nil destination with *InvalidUnmarshalError before any method is invoked.
+	if claims == nil {
+		return fmt.Errorf("%w: claims must not be nil", ErrInvalidClaims)
+	}
 	if c, ok := claims.(*Claims); ok {
+		if c == nil {
+			return fmt.Errorf("%w: claims must not be nil", ErrInvalidClaims)
+		}
 		// validateClaims covers all fields including registered claims strings
 		if err := validateClaims(c); err != nil {
 			return fmt.Errorf("%w: %v", ErrInvalidClaims, err)
@@ -151,9 +163,15 @@ func (c *Claims) GetRegisteredClaims() *RegisteredClaims {
 
 // Validate performs validation on the Claims.
 // This implements the CustomClaims interface.
+//
+// It returns a descriptive error rather than the ErrInvalidClaims sentinel so
+// that validateCustomClaims can wrap it once — otherwise the Create path
+// produces a redundant "invalid claims: invalid claims" message. Callers that
+// need the sentinel should use errors.Is on the error returned by Create,
+// which wraps this with ErrInvalidClaims.
 func (c *Claims) Validate() error {
 	if c.UserID == "" && c.Username == "" {
-		return ErrInvalidClaims
+		return errors.New("user_id or username is required")
 	}
 	return nil
 }

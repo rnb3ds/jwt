@@ -1,6 +1,7 @@
 package jwt
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -162,7 +163,7 @@ func TestSecurityDoSProtection(t *testing.T) {
 	}
 
 	// Extremely long token should be rejected
-	longToken := strings.Repeat("a", 20000) + ".b.c"
+	longToken := strings.Repeat("a", 200000) + ".b.c"
 	_, valid, err := processor.Validate(longToken)
 	if valid || err == nil {
 		t.Error("Should reject extremely long tokens")
@@ -193,5 +194,66 @@ func TestSecurityTokenValidation(t *testing.T) {
 				t.Errorf("Should reject: %s", tt.name)
 			}
 		})
+	}
+}
+
+// TestSecurityNilClaimsNoPanic verifies that nil claims (a nil interface or a
+// typed-nil *Claims) never cause a panic on the public API — they must surface
+// as a returned error. Regression guard for SEC-003 (Panic Protection).
+func TestSecurityNilClaimsNoPanic(t *testing.T) {
+	processor, err := newTestProcessor(testSecretKey)
+	if err != nil {
+		t.Fatalf("Failed to create processor: %v", err)
+	}
+	defer func() { _ = processor.Close() }() // best-effort cleanup
+
+	// A real, signed token so the nil-claims argument actually reaches the
+	// decoding step (rather than being rejected as a malformed token).
+	validToken, err := processor.Create(&Claims{UserID: "user123"})
+	if err != nil {
+		t.Fatalf("setup Create failed: %v", err)
+	}
+
+	var nilClaims *Claims         // typed-nil
+	var nilInterface CustomClaims // nil interface
+
+	// run asserts f returns a non-nil error and does not panic.
+	run := func(t *testing.T, name string, f func() error) {
+		t.Helper()
+		var got error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("%s: panicked instead of returning an error: %v", name, r)
+				}
+			}()
+			got = f()
+		}()
+		if got == nil {
+			t.Errorf("%s: expected an error for nil claims, got nil", name)
+		}
+	}
+
+	cases := []struct {
+		name   string
+		action func() error
+	}{
+		{"Create(nil interface)", func() error { _, e := processor.Create(nil); return e }},
+		{"CreateRefresh(nil interface)", func() error { _, e := processor.CreateRefresh(nil); return e }},
+		{"Create(typed-nil *Claims)", func() error { _, e := processor.Create(nilClaims); return e }},
+		{"CreateRefresh(typed-nil *Claims)", func() error { _, e := processor.CreateRefresh(nilClaims); return e }},
+		{"ValidateInto(nil interface)", func() error { _, _, e := processor.ValidateInto(validToken, nilInterface); return e }},
+		{"RefreshInto(nil interface)", func() error { _, e := processor.RefreshInto(validToken, nilInterface); return e }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) { run(t, c.name, c.action) })
+	}
+
+	// Create/CreateRefresh nil cases should be identifiable via ErrInvalidClaims.
+	if _, e := processor.Create(nil); !errors.Is(e, ErrInvalidClaims) {
+		t.Errorf("Create(nil) error should wrap ErrInvalidClaims, got %v", e)
+	}
+	if _, e := processor.Create(nilClaims); !errors.Is(e, ErrInvalidClaims) {
+		t.Errorf("Create(typed-nil *Claims) error should wrap ErrInvalidClaims, got %v", e)
 	}
 }

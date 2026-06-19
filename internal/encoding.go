@@ -9,8 +9,16 @@ import (
 )
 
 const (
-	maxSegmentLength = 4096 // Maximum JWT segment length
-	maxDecodedSize   = 2048 // Maximum decoded payload size
+	// maxDecodedSize caps the decoded size of a single JWT segment (header or
+	// payload). It is a DoS guard and MUST be large enough to hold the largest
+	// payload the package's own validation allows (see jwt.maxArraySize /
+	// jwt.maxStringLength / jwt.maxExtraSize), otherwise tokens that pass Create
+	// would be unparseable by Validate. 64 KiB covers realistic claim sets
+	// (e.g. 100 permissions of 256 bytes) with headroom.
+	maxDecodedSize = 65536
+	// maxSegmentLength is the base64url-encoded counterpart of maxDecodedSize
+	// (EncodedLen(65536) == 87382), plus a small margin.
+	maxSegmentLength = 87384
 )
 
 // decodeBufPool pools byte slices for base64 decoding operations.
@@ -42,6 +50,9 @@ func stringToBytes(s string) []byte {
 	return unsafe.Slice(unsafe.StringData(s), len(s))
 }
 
+// DecodeSegment base64url-decodes a single JWT segment (header or payload) and
+// JSON-unmarshals the result into dest. Empty or oversized segments are rejected
+// as a DoS guard (see maxSegmentLength / maxDecodedSize).
 func DecodeSegment(segment string, dest any) error {
 	segLen := len(segment)
 	if segLen == 0 {
@@ -112,6 +123,40 @@ func DecodeHeaderAlg(headerSegment string) string {
 	return extractAlgFromJSON(data)
 }
 
+// internedAlgs maps the byte form of each standard JWT algorithm to its
+// canonical string. Returning the constant string (rather than allocating a
+// fresh one from the decoded bytes) removes one allocation per validated token,
+// since every standard token carries one of these algorithms in its header.
+var internedAlgs = map[[5]byte]string{
+	{'H', 'S', '2', '5', '6'}: "HS256",
+	{'H', 'S', '3', '8', '4'}: "HS384",
+	{'H', 'S', '5', '1', '2'}: "HS512",
+	{'R', 'S', '2', '5', '6'}: "RS256",
+	{'R', 'S', '3', '8', '4'}: "RS384",
+	{'R', 'S', '5', '1', '2'}: "RS512",
+	{'P', 'S', '2', '5', '6'}: "PS256",
+	{'P', 'S', '3', '8', '4'}: "PS384",
+	{'P', 'S', '5', '1', '2'}: "PS512",
+	{'E', 'S', '2', '5', '6'}: "ES256",
+	{'E', 'S', '3', '8', '4'}: "ES384",
+	{'E', 'S', '5', '1', '2'}: "ES512",
+}
+
+// internAlg returns the canonical string for a known 5-character JWT algorithm
+// without allocating, falling back to string(b) for anything unrecognized. The
+// standard algorithms are all exactly 5 bytes (two letters + three digits), so
+// the lookup hits on essentially every real token.
+func internAlg(b []byte) string {
+	if len(b) == 5 {
+		var k [5]byte
+		copy(k[:], b)
+		if s, ok := internedAlgs[k]; ok {
+			return s
+		}
+	}
+	return string(b)
+}
+
 // extractAlgFromJSON scans the JSON data for the "alg" field value.
 // Handles both {"alg":"HS256","typ":"JWT"} and {"typ":"JWT","alg":"HS256"}.
 // Skips over JSON string values when scanning for the key, preventing
@@ -149,7 +194,7 @@ func extractAlgFromJSON(data []byte) string {
 							pos++
 						}
 						if pos < len(data) {
-							return string(data[start:pos])
+							return internAlg(data[start:pos])
 						}
 					}
 				}

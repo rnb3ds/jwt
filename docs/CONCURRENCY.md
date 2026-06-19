@@ -55,8 +55,8 @@ go func() {
 ```go
 type Processor struct {
     // These fields are protected by atomic operations or mutexes:
-    closed           atomic.Bool      // Atomic flag
-    blacklistManager *Manager         // Has internal synchronization (sync.RWMutex)
+    closed           atomic.Bool       // Atomic flag (CAS'd by Close())
+    blacklistManager *Manager          // Thread-safe via its store; the built-in memoryStore holds a sync.RWMutex
     rateLimiter      RateLimitProvider // Interface requires thread-safety
 
     // These are read-only after creation:
@@ -87,7 +87,11 @@ var processor *jwt.Processor
 func init() {
     cfg := jwt.DefaultConfig()
     cfg.SecretKey = os.Getenv("JWT_SECRET")
-    processor, _ = jwt.New(cfg)
+    var err error
+    processor, err = jwt.New(cfg)
+    if err != nil {
+        log.Fatalf("failed to create processor: %v", err)
+    }
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
@@ -300,9 +304,9 @@ go processor.Create(claims)
 
 ```go
 go processor.Create(claims)
-processor.Close() // Sets closed flag, releases resources
-// After Close() returns, new operations return ErrProcessorClosed
-// In-flight operations may still complete
+processor.Close() // CAS's closed flag, then blocks on the write lock
+// After Close() returns: all in-flight operations have completed AND new
+// operations return ErrProcessorClosed. Close does not return early.
 ```
 
 3. **Blacklist operations are sequentially consistent**
@@ -313,17 +317,50 @@ revoked, _ := processor.IsRevoked(token)
 // revoked is always true (no stale reads)
 ```
 
-### Atomic Operations
+### Closed-State Guard (read/write lock protocol)
+
+Every operation is guarded by `beginOp()` / `endOp()`, not a bare atomic check:
 
 ```go
-// Close check uses atomic operation
-func (p *Processor) Create(claims CustomClaims) (string, error) {
-    if p.closed.Load() { // Atomic read
-        return "", ErrProcessorClosed
+// beginOp takes the read lock FIRST, then checks the closed flag under it.
+func (p *Processor) beginOp() error {
+    p.mu.RLock()
+    if p.closed.Load() {
+        p.mu.RUnlock()
+        return ErrProcessorClosed
     }
-    // ...
+    return nil
+}
+
+func (p *Processor) endOp() { p.mu.RUnlock() }
+
+// Each public method brackets its work with the two:
+func (p *Processor) Create(claims CustomClaims) (string, error) {
+    if err := p.beginOp(); err != nil {
+        return "", err
+    }
+    defer p.endOp()
+    // ... actual work ...
 }
 ```
+
+`Close()` flips the flag with `CompareAndSwap`, then acquires the **write** lock:
+
+```go
+func (p *Processor) Close() error {
+    if !p.closed.CompareAndSwap(false, true) {
+        return ErrProcessorClosed // already closed
+    }
+    p.mu.Lock() // waits for every in-flight operation's RLock to release
+    // ... close store, rate limiter, zero the secret key ...
+}
+```
+
+Because the closed check happens *under* the read lock and `Close` needs the
+write lock, the two are mutually exclusive: once `Close` holds the write lock,
+no `beginOp` can pass its check, and all in-flight operations have already
+released their read locks. This is why `Close` blocks until in-flight work is
+done rather than racing it.
 
 ---
 
@@ -418,7 +455,9 @@ go test -race ./...
 
 ```go
 func TestConcurrentTokenOperations(t *testing.T) {
-    processor, err := jwt.New(jwt.DefaultConfig())
+    cfg := jwt.DefaultConfig()
+    cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
+    processor, err := jwt.New(cfg)
     require.NoError(t, err)
     defer processor.Close()
 
@@ -465,7 +504,12 @@ func TestConcurrentTokenOperations(t *testing.T) {
 
 ```go
 func BenchmarkConcurrentValidation(b *testing.B) {
-    processor, _ := jwt.New(jwt.DefaultConfig())
+    cfg := jwt.DefaultConfig()
+    cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
+    processor, err := jwt.New(cfg)
+    if err != nil {
+        b.Fatal(err)
+    }
     defer processor.Close()
 
     claims := &jwt.Claims{UserID: "user123"}
@@ -488,7 +532,12 @@ func TestStressTokenRevocation(t *testing.T) {
         t.Skip("skipping stress test")
     }
 
-    processor, _ := jwt.New(jwt.DefaultConfig())
+    cfg := jwt.DefaultConfig()
+    cfg.SecretKey = "Kx9#mP2$vL8@nQ5!wR7&tY3^uI6*oE4%aS1+dF0-gH9~"
+    processor, err := jwt.New(cfg)
+    if err != nil {
+        t.Fatal(err)
+    }
     defer processor.Close()
 
     var wg sync.WaitGroup
